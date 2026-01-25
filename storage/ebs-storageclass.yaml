@@ -1,0 +1,19 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ebs-sc
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+    type: gp3  # General Purpose SSD v3 (cost-optimized)
+    # Alternative types:
+    # - gp2: General Purpose SSD v2 (legacy)
+    # - io1: Provisioned IOPS SSD (high performance)
+    # - io2: Provisioned IOPS SSD v2 (higher durability)
+    # - st1: Throughput Optimized HDD (large sequential workloads)
+    # - sc1: Cold HDD (infrequent access)
+    
+volumeBindingMode: WaitForFirstConsumer  # Bind PV when pod is scheduled
+allowVolumeExpansion: true  # Allow PVC resizing
+reclaimPolicy: Delete  # Delete EBS volume when PVC is deleted

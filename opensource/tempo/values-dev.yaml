@@ -1,0 +1,64 @@
+# Tempo Development Configuration
+# Monolithic mode for thesis demo
+# Architecture: Tempo receives traces from AI Model (not directly from apps)
+# Backend Storage: AWS S3 (tempo-traces bucket)
+
+tempo:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  
+  # OTLP receivers - receives traces from AI Anomaly Detection Model
+  # AI Model forwards ALL traces (normal + anomaly) via OTLP/gRPC
+  # Endpoint: tempo-distributor.tempo.svc.cluster.local:4317
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+  
+  # Storage backend configuration - AWS S3
+  # Credentials stored in Kubernetes Secret: tempo-s3-credentials
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: pqhung-tempo-traces  # Tempo owns this bucket structure
+        endpoint: s3.amazonaws.com
+        region: ap-southeast-1
+        # Credentials from Kubernetes Secret (see Phase 4.2.1 in task.plan)
+        access_key: ${AWS_ACCESS_KEY_ID}
+        secret_key: ${AWS_SECRET_ACCESS_KEY}
+      # Tempo's internal block format
+      block:
+        version: vParquet4  # Tempo's columnar storage format
+      # Write-Ahead Log for ingestion buffering
+      wal:
+        path: /var/tempo/wal
+  
+  # Trace lifecycle management
+  ingester:
+    trace_idle_period: 10s
+    max_block_duration: 30m
+  
+  # Compaction and retention (managed by Tempo)
+  compactor:
+    compaction:
+      block_retention: 720h  # 30 days retention
+
+# Local WAL persistence (for ingestion buffer only)
+# Actual trace data stored in S3, not local PVC
+persistence:
+  enabled: true
+  size: 5Gi  # Only for WAL buffer, not trace storage
+  storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+
+# Service configuration
+service:
+  type: ClusterIP

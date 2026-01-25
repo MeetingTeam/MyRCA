@@ -1,0 +1,46 @@
+# Grafana Development Configuration
+# Single instance with Tempo datasource
+
+replicas: 1
+
+# Persistence for dashboards
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+
+# Resources
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 200m
+    memory: 512Mi
+
+# Admin credentials (DEV ONLY)
+adminUser: admin
+adminPassword: admin
+
+# Tempo datasource configuration
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Tempo
+        type: tempo
+        access: proxy
+        url: http://tempo.tempo.svc.cluster.local:3100
+        isDefault: true
+        editable: true
+        jsonData:
+          httpMethod: GET
+
+# Service configuration
+service:
+  type: NodePort
+  nodePort: 30300  # Access via node IP:30300
+
+# Enable useful plugins
+plugins:
+  - grafana-clock-panel

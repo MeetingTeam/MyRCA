@@ -1,0 +1,529 @@
+# Kubernetes Observability Stack Deployment Plan
+# Project: Thesis - Redpanda + Tempo + Grafana Integration
+# Version: 1.0 - Thesis Edition
+
+---
+
+## Phase 0: EBS CSI Driver & StorageClass Setup
+
+### 0.1 Install AWS EBS CSI Driver
+- [x] Add EBS CSI Driver Helm repository
+  ```bash
+  helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+  helm repo update
+  ```
+- [x] Create namespace for CSI driver (if not using kube-system)
+  ```bash
+  kubectl create namespace kube-system --dry-run=client -o yaml | kubectl apply -f -
+  ```
+- [x] Install EBS CSI Driver
+  ```bash
+  helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver \
+    --namespace kube-system \
+    --set enableVolumeScheduling=true \
+    --set enableVolumeResizing=true \
+    --set enableVolumeSnapshot=true
+  ```
+- [x] Verify EBS CSI Driver installation
+  ```bash
+  kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-ebs-csi-driver
+  # Expected: ebs-csi-controller and ebs-csi-node pods Running
+  ```
+- [x] Check CSI driver is registered
+  ```bash
+  kubectl get csidrivers
+  # Expected: ebs.csi.aws.com
+  ```
+
+### 0.2 Create EBS StorageClass
+- [ ] Create `d:\MyRCA\storage\ebs-storageclass.yaml`
+  ```yaml
+  # EBS CSI StorageClass Configuration
+  # Optimized for observability workloads
+  apiVersion: storage.k8s.io/v1
+  kind: StorageClass
+  metadata:
+    name: ebs-sc
+    annotations:
+      storageclass.kubernetes.io/is-default-class: "true"
+  provisioner: ebs.csi.aws.com
+  parameters:
+    type: gp3  # General Purpose SSD v3 (cost-optimized)
+    # Alternative types:
+    # - gp2: General Purpose SSD v2 (legacy)
+    # - io1: Provisioned IOPS SSD (high performance)
+    # - io2: Provisioned IOPS SSD v2 (higher durability)
+    # - st1: Throughput Optimized HDD (large sequential workloads)
+    # - sc1: Cold HDD (infrequent access)
+    
+  volumeBindingMode: WaitForFirstConsumer  # Bind PV when pod is scheduled
+  allowVolumeExpansion: true  # Allow PVC resizing
+  reclaimPolicy: Delete  # Delete EBS volume when PVC is deleted
+  ```
+- [x] Apply StorageClass
+  ```bash
+  kubectl apply -f d:\MyRCA\storage\ebs-storageclass.yaml
+  ```
+- [x] Verify StorageClass created
+  ```bash
+  kubectl get storageclass
+  # Expected: ebs-sc with PROVISIONER ebs.csi.aws.com
+  ```
+- [x] Verify default StorageClass
+  ```bash
+  kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}'
+  # Expected: ebs-sc
+  ```
+
+
+
+**Phase 0 Status:** Not Started / In Progress / ✅ Completed
+
+---
+
+## Phase 1: Environment Setup & Prerequisites
+
+### 1.1 Kubernetes Cluster Setup
+- [x] Verify Kubernetes cluster is running
+  ```bash
+  kubectl cluster-info
+  kubectl get nodes
+  ```
+- [x] Check available resources (4 CPU cores, 8GB RAM minimum)
+  ```bash
+  kubectl top nodes  # If metrics-server available
+  ```
+- [x] Verify EBS StorageClass exists (from Phase 0)
+  ```bash
+  kubectl get storageclass ebs-sc
+  # Expected: ebs-sc with PROVISIONER ebs.csi.aws.com
+  ```
+
+### 1.2 Helm Installation & Repository Setup
+- [x] Verify Helm is installed (v3.x)
+  ```bash
+  helm version
+  ```
+- [x] Add Redpanda Helm repository
+  ```bash
+  helm repo add redpanda https://charts.redpanda.com
+  ```
+- [x] Add Grafana Helm repository
+  ```bash
+  helm repo add grafana https://grafana.github.io/helm-charts
+  ```
+- [x] Update Helm repositories
+  ```bash
+  helm repo update
+  ```
+- [x] List available charts
+  ```bash
+  helm search repo redpanda
+  helm search repo grafana/tempo
+  helm search repo grafana/grafana
+  ```
+
+### 1.3 Create Namespaces
+- [x] Create redpanda namespace
+  ```bash
+  kubectl create namespace redpanda
+  ```
+- [x] Create tempo namespace
+  ```bash
+  kubectl create namespace tempo
+  ```
+- [x] Create grafana namespace
+  ```bash
+  kubectl create namespace grafana
+  ```
+- [x] Verify namespaces created
+  ```bash
+  kubectl get namespaces | grep -E "redpanda|tempo|grafana"
+  ```
+
+**Phase 1 Status:** Not Started / In Progress / ✅ Completed
+
+---
+
+## Phase 2: Configuration Files Preparation
+
+### 2.1 Create Helm Values Directory Structure
+- [x] Create helm-values directory
+  ```bash
+  mkdir -p d:\MyRCA\opensource\redpanda
+  mkdir -p d:\MyRCA\opensource\tempo
+  mkdir -p d:\MyRCA\opensource\grafana
+  ```
+
+### 2.2 Create Redpanda Configuration
+- [x] Create `d:\MyRCA\opensource\redpanda\values-dev.yaml`
+  ```yaml
+  # Redpanda Development Configuration
+  # Single-broker setup for thesis demo
+  
+  statefulset:
+    replicas: 1  # Single broker
+  
+  storage:
+    persistentVolume:
+      enabled: true
+      size: 10Gi
+      storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+      # Alternative: Use "ebs-high-perf" for higher performance
+  
+  resources:
+    cpu:
+      cores: 1
+    memory:
+      enable_memory_locking: false
+      container:
+        max: 2Gi
+  
+  # Simplified security for development
+  auth:
+    sasl:
+      enabled: false
+  
+  tls:
+    enabled: false
+  
+  # Internal access only
+  external:
+    enabled: false
+  
+  # Redpanda Console (optional web UI)
+  console:
+    enabled: true
+  ```
+- [x] Validate YAML syntax
+  ```bash
+  # Can use: yamllint values-dev.yaml
+  ```
+
+### 2.3 Create Tempo Configuration
+- [x] Create `d:\MyRCA\opensource\tempo\values-dev.yaml`
+  ```yaml
+  # Tempo Development Configuration
+  # Monolithic mode for thesis demo
+  # Architecture: Tempo receives traces from AI Model (not directly from apps)
+  # Backend Storage: AWS S3 (tempo-traces bucket)
+  
+  tempo:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    
+    # OTLP receivers - receives traces from AI Anomaly Detection Model
+    # AI Model forwards ALL traces (normal + anomaly) via OTLP/gRPC
+    # Endpoint: tempo-distributor.tempo.svc.cluster.local:4317
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    
+    # Storage backend configuration - AWS S3
+    storage:
+      trace:
+        backend: s3
+        s3:
+          bucket: tempo-traces  # Tempo owns this bucket structure
+          endpoint: s3.amazonaws.com
+          region: ap-southeast-1  # Change to your AWS region
+          access_key: ${AWS_ACCESS_KEY_ID}
+          secret_key: ${AWS_SECRET_ACCESS_KEY}
+        # Tempo's internal block format
+        block:
+          version: vParquet4  # Tempo's columnar storage format
+        # Write-Ahead Log for ingestion buffering
+        wal:
+          path: /var/tempo/wal
+    
+    # Trace lifecycle management
+    ingester:
+      trace_idle_period: 10s
+      max_block_duration: 30m
+    
+    # Compaction and retention (managed by Tempo)
+    compactor:
+      compaction:
+        block_retention: 720h  # 30 days retention
+  
+  # Local WAL persistence (for ingestion buffer only)
+  # Actual trace data stored in S3, not local PVC
+  persistence:
+    enabled: true
+    size: 5Gi  # Only for WAL buffer, not trace storage
+    storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+  
+  # Service configuration
+  service:
+    type: ClusterIP
+  ```
+
+### 2.4 Create Grafana Configuration
+- [x] Create `d:\MyRCA\opensource\grafana\values-dev.yaml`
+  ```yaml
+  # Grafana Development Configuration
+  # Single instance with Tempo datasource
+  
+  replicas: 1
+  
+  # Persistence for dashboards
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+  
+  # Resources
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+  
+  # Admin credentials (DEV ONLY)
+  adminUser: admin
+  adminPassword: admin
+  
+  # Tempo datasource configuration
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Tempo
+          type: tempo
+          access: proxy
+          url: http://tempo.tempo.svc.cluster.local:3100
+          isDefault: true
+          editable: true
+          jsonData:
+            httpMethod: GET
+  
+  # Service configuration
+  service:
+    type: NodePort
+    nodePort: 30300  # Access via node IP:30300
+  
+  # Enable useful plugins
+  plugins:
+    - grafana-clock-panel
+  ```
+
+**Phase 2 Status:** Not Started / In Progress / ✅ Completed
+
+---
+
+## Phase 3: Deploy Redpanda
+
+### 3.1 Install Redpanda
+- [x] Install using Helm chart v25.1.1
+  ```bash
+  helm install redpanda redpanda/redpanda \
+    --version 25.1.1 \
+    --namespace redpanda \
+    -f d:\MyRCA\opensource\redpanda\values-dev.yaml \
+    --timeout 10m
+  ```
+
+### 3.2 Verify Deployment
+- [x] Check deployment status
+  ```bash
+  kubectl get pods,pvc,svc -n redpanda
+  # Expected: redpanda-0 (2/2 Running), datadir-redpanda-0 (Bound)
+  ```
+
+### 3.3 Test Functionality (Optional)
+- [x] Create and test topic
+  ```bash
+  kubectl exec -n redpanda redpanda-0 -- rpk topic create test-topic
+  kubectl exec -n redpanda redpanda-0 -- rpk topic list
+  ```
+
+**Phase 3 Status:** ✅ Completed
+
+---
+
+## Phase 4: Deploy Grafana Tempo
+
+### 4.1 Pre-Deployment Validation
+- [x] Verify namespace exists
+  ```bash
+  kubectl get namespace tempo
+  ```
+- [x] Check values file
+  ```bash
+  cat d:\MyRCA\opensource\tempo\values-dev.yaml
+  ```
+
+### 4.2 S3 Backend Setup
+
+#### 4.2.1 Create S3 Bucket (Manual - AWS Console)
+- [ ] Login to AWS Console (https://console.aws.amazon.com/)
+- [ ] Navigate to S3 service
+- [ ] Create bucket with following settings:
+  - **Bucket name:** `pqhung-tempo-traces`
+  - **Region:** Asia Pacific (Singapore) `ap-southeast-1`
+  - **Block Public Access:** Enable (all checkboxes)
+  - **Bucket Versioning:** Enable (recommended)
+  - **Default encryption:** SSE-S3 or SSE-KMS
+- [ ] Verify bucket created successfully
+
+#### 4.2.2 Create Kubernetes Secret for S3 Credentials
+- [x] Create secret with AWS credentials
+  ```bash
+  kubectl create secret generic tempo-s3-credentials \
+    --from-literal=access-key= \
+    --from-literal=secret-key= \
+    -n tempo
+  ```
+  **Security Note:** These credentials should be rotated after initial setup
+  
+- [x] Verify secret created
+  ```bash
+  kubectl get secret tempo-s3-credentials -n tempo
+  kubectl describe secret tempo-s3-credentials -n tempo
+  ```
+
+#### 4.2.3 Configure IAM Permissions (AWS Console)
+- [ ] Navigate to IAM → Users
+- [ ] Find user with access key `AKIA3QZTPGI5JRSD6SVY`
+- [ ] Attach policy with S3 permissions:
+
+
+### 4.3 Install Tempo
+- [x] Install Tempo using Helm (monolithic mode)
+  ```bash
+  helm install tempo grafana/tempo \
+    --version 1.23.3 \
+    --namespace tempo \
+    -f d:\MyRCA\opensource\tempo\values-dev.yaml \
+    --timeout 5m
+  ```
+- [ ] Apply secret environment variables patch
+  ```bash
+  kubectl patch deployment tempo -n tempo --patch-file d:\MyRCA\opensource\tempo\tempo-secret-patch.yaml
+  ```
+- [x] Wait for deployment to complete
+  ```bash
+  kubectl rollout status deployment/tempo -n tempo --timeout=5m
+  ```
+
+### 4.4 Verify Tempo Deployment
+- [x] Check pod status
+  ```bash
+  kubectl get pods -n tempo
+  # Expected: tempo-xxx Running
+  ```
+- [x] Check PVC status
+  ```bash
+  kubectl get pvc -n tempo
+  ```
+- [x] Check service status
+  ```bash
+  kubectl get svc -n tempo
+  # Expected: tempo service with port 3100 (query) and 4317/4318 (OTLP)
+  ```
+- [x] View Tempo logs
+  ```bash
+  kubectl logs -n tempo deployment/tempo --tail=50
+  ```
+- [x] Check OTLP receiver is listening
+  ```bash
+  kubectl logs -n tempo deployment/tempo | grep -i otlp
+  ```
+
+
+
+**Phase 4 Status:** Not Started / In Progress / ✅ Completed
+
+---
+
+## Phase 5: Deploy Grafana
+
+### 5.1 Pre-Deployment Validation
+- [x] Verify namespace exists
+  ```bash
+  kubectl get namespace grafana
+  ```
+- [x] Verify Tempo is running
+  ```bash
+  kubectl get pods -n tempo
+  ```
+- [x] Check values file includes Tempo datasource
+  ```bash
+  cat d:\MyRCA\opensource\grafana\values-dev.yaml | grep -A 10 datasources
+  ```
+
+### 5.2 Install Grafana
+- [x] Install Grafana OSS using Helm
+  ```bash
+  helm install grafana grafana/grafana \
+    --version 9.2.10 \
+    --namespace grafana \
+    -f d:\MyRCA\opensource\grafana\values-dev.yaml \
+    --timeout 5m
+  ```
+  **Note:** Helm chart version 9.2.10 includes Grafana OSS app version 12.0.2
+- [x] Wait for deployment to complete
+  ```bash
+  kubectl rollout status deployment/grafana -n grafana --timeout=5m
+  ```
+
+### 5.3 Verify Grafana Deployment
+- [x] Check pod status
+  ```bash
+  kubectl get pods -n grafana
+  # Expected: grafana-xxx Running
+  ```
+- [x] Check PVC status
+  ```bash
+  kubectl get pvc -n grafana
+  ```
+- [x] Check service status
+  ```bash
+  kubectl get svc -n grafana
+  # Expected: grafana service type NodePort
+  ```
+- [x] View Grafana logs
+  ```bash
+  kubectl logs -n grafana deployment/grafana --tail=50
+  ```
+
+### 5.4 Access Grafana Web UI
+- [x] Get Grafana admin password (if not set in values)
+  ```bash
+  kubectl get secret -n grafana grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+  ```
+- [x] Access Grafana via NodePort
+  ```bash
+  # Get node IP
+  kubectl get nodes -o wide
+  # Access: http://<NODE-IP>:30300
+  # Or use port-forward:
+  kubectl port-forward -n grafana svc/grafana 3000:80
+  # Access: http://localhost:3000
+  ```
+- [x] Login to Grafana
+  - Username: `admin`
+  - Password: `admin` (or from secret above)
+- [x] Verify Grafana UI loads successfully
+
+### 5.5 Verify Tempo Datasource Integration
+- [x] Navigate to Configuration → Data Sources
+- [x] Verify "Tempo" datasource exists
+- [x] Click on Tempo datasource
+- [x] Click "Save & Test" button
+- [x] Verify connection is successful (green checkmark)
+- [x] Check datasource URL is correct: `http://tempo.tempo.svc.cluster.local:3100`
+
+**Phase 5 Status:** ✅ Completed
+

@@ -1,0 +1,36 @@
+# Redpanda Development Configuration
+# Single-broker setup for thesis demo
+
+statefulset:
+  replicas: 1  # Single broker
+
+storage:
+  persistentVolume:
+    enabled: true
+    size: 10Gi
+    storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+    # Alternative: Use "ebs-high-perf" for higher performance
+
+resources:
+  cpu:
+    cores: 1
+  memory:
+    enable_memory_locking: false
+    container:
+      max: 2Gi
+
+# Simplified security for development
+auth:
+  sasl:
+    enabled: false
+
+tls:
+  enabled: false
+
+# Internal access only
+external:
+  enabled: false
+
+# Redpanda Console (optional web UI)
+console:
+  enabled: true
