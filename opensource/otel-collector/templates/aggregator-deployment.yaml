@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "otel-collector.aggregator.name" . }}
+  labels:
+    {{- include "otel-collector.aggregator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.aggregator.deployment.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "otel-collector.aggregator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.aggregator.deployment.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "otel-collector.aggregator.labels" . | nindent 8 }}
+        {{- with .Values.aggregator.deployment.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.aggregator.serviceAccount.enabled }}
+      serviceAccountName: {{ include "otel-collector.aggregator.name" . }}
+      {{- end }}
+      volumes:
+        - name: otel-config
+          configMap:
+            name: {{ include "otel-collector.aggregator.name" . }}
+            optional: false
+            items:
+              - key: config.yaml
+                path: "config.yaml"
+        - name: traces-volume
+          emptyDir: {}
+      {{- with .Values.aggregator.deployment.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: busybox
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep infinity"]
+          volumeMounts:
+            - name: traces-volume
+              mountPath: /otel
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.aggregator.deployment.env }}
+          env:
+            {{- toYaml . | nindent 12}}
+          {{- end}}
+          {{- if .Values.aggregator.deployment.args }}
+          args:
+            {{- toYaml .Values.aggregator.deployment.args | nindent 12 }}
+          {{- end }}
+          {{- with .Values.aggregator.deployment.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}           
+          ports:
+          {{- range $name, $svcPort := .Values.aggregator.service.ports}}
+            - name: {{ $name }}
+              containerPort: {{ $svcPort }}
+              protocol: TCP
+          {{- end }}
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otelcol-contrib
+            - name: traces-volume
+              mountPath: /otel
+          {{- with .Values.aggregator.deployment.livenessProbe}}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end}}
+          {{- with .Values.aggregator.deployment.readinessProbe}}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end}}
+      {{- with .Values.aggregator.deployment.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aggregator.deployment.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aggregator.deployment.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

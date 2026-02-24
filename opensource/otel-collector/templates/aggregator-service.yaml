@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "otel-collector.aggregator.name" . }}
+  labels:
+    {{- include "otel-collector.aggregator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.aggregator.service.type }}
+  ports:
+    {{- range $name, $svcPort := .Values.aggregator.service.ports}}
+    - name: {{$name}}
+      port: {{ $svcPort }}
+      targetPort: {{ $name }}
+      protocol: TCP
+  {{- end}}
+  selector:
+    {{- include "otel-collector.aggregator.selectorLabels" . | nindent 4 }}

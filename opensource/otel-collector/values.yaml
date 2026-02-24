@@ -1,0 +1,126 @@
+image:
+  repository: "otel/opentelemetry-collector-contrib"
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+
+nameOverride: ""
+fullnameOverride: ""
+
+ingestor:
+  serviceAccount: 
+    enabled: false
+
+  otel_config:
+    processors:
+      batch:
+        timeout: 3s
+        send_batch_size: 1
+
+  deployment:
+    podAnnotations: {}
+    podLabels: {}
+
+    podSecurityContext: {}
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000 
+    
+    replicaCount: 1
+
+    env: []
+
+    resources: {}
+
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 13133
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 13133
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+    nodeSelector: {}
+
+    tolerations: []
+
+    affinity: {}
+
+  service:
+    type: ClusterIP
+    ports:
+      grpc: 4317
+      http: 4318
+
+  ingress:
+    enabled: false
+
+aggregator:
+  serviceAccount: 
+    enabled: false
+  
+  otel_config: 
+    processors:
+      batch:
+        timeout: 3s
+        send_batch_size: 1
+      groupbytrace:
+        wait_duration: 3s
+        num_traces: 1000
+    
+    exporters:
+      otlp:
+        endpoint: "tempo.tempo.svc.cluster.local:4317"
+        tls:
+          insecure: true
+  
+  deployment:
+    podAnnotations: {}
+    podLabels: {}
+
+    podSecurityContext: {}
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000 
+    
+    replicaCount: 1
+
+    env: []
+
+    resources: {}
+
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 13133
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 13133
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+    nodeSelector: {}
+
+    tolerations: []
+
+    affinity: {}
+
+  service:
+    type: ClusterIP
+    ports:
+      grpc: 4317
+      http: 4318
+
+  ingress:
+    enabled: false

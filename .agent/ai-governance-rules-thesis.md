@@ -84,25 +84,35 @@ This section defines the **end-to-end workflow** and **data flow governance** fo
 
 ### Workflow Overview
 
-The platform implements a **streaming-first architecture** where distributed traces flow through multiple processing stages:
+The platform implements a **dual-path, parallel export architecture** where distributed traces are collected centrally and then fan out into two concurrent pipelines:
 
 ```mermaid
 graph TB
-    A[Kubernetes Apps] -->|OTLP gRPC| B[OTel Collector]
-    B -->|Publish| C[Redpanda Stream]
-    C -->|Consumer: AI Model| D[Anomaly Detection]
-    D -->|Forward Traces| E[Grafana Tempo]
-    E -->|Store to Backend| F[AWS S3 - tempo-traces]
-    D -->|Store Anomaly Traces| G[AWS S3 - anomaly-data]
-    E <-->|Query| H[Grafana OSS]
-    G -->|Read for RCA| I[RCA Service]
-    I -->|Notify| J[Discord/Alerts]
-    F -->|Training Data| K[Airflow Pipeline]
-    G -->|Anomaly Training Data| K
-    K -->|Train| L[MLflow]
-    L -->|Model Artifacts| M[AWS S3 - ml-models]
-    M -->|Load Models| N[Model Serving]
-    N -->|Inference| D
+    A["Kubernetes Apps"] -->|OTLP gRPC| B["OTel Ingestor"]
+    B -->|Load-balance OTLP| C["OTel Aggregator"]
+
+    %% Parallel fork
+    C -->|"Path 1: AI Pipeline"| D["Redpanda (topic: traces)"]
+    C -->|"Path 2: Direct Tracing"| H["Grafana Tempo"]
+
+    %% Path 1 – AI/ML pipeline
+    D -->|"Consumer: preprocessing-group"| E["Preprocessing Serving"]
+    E -->|"Publishes: topic: traces-preprocessed"| F["Redpanda (topic: traces-preprocessed)"]
+    F -->|"Consumer: anomaly-group"| G["Anomaly Detection Serving"]
+    G -->|"Store anomaly traces (Parquet/Snappy)"| S1["AWS S3 - anomaly-data"]
+    S1 -->|Read for RCA| I["RCA Service"]
+    I -->|Notify| J["Discord / Alerts"]
+
+    %% Path 2 – Tempo
+    H -->|Store ALL traces natively| S2["AWS S3 - tempo-traces"]
+    H <-->|Query| K["Grafana OSS"]
+
+    %% Training loop
+    S2 -->|Normal trace data| L["Airflow Pipeline"]
+    S1 -->|Anomaly training data| L
+    L -->|Train| M["MLflow"]
+    M -->|Model artifacts| S3["AWS S3 - ml-models"]
+    S3 -->|Load models| G
 ```
 
 ### WF-001: Request Ingress & Trace Initialization
@@ -176,24 +186,27 @@ exception.message: "Connection timeout"
 **Evidence:**
 - OpenTelemetry Semantic Conventions: https://opentelemetry.io/docs/specs/semconv/
 
-### WF-003: Centralized Trace Collection
+### WF-003: Centralized Trace Collection (Ingestor → Aggregator)
 
-**Stage:** Aggregation and normalization of trace data
+**Stage:** Two-tier OTel Collector pipeline — receive, normalize, then fan out
 
 **Components:**
-- OpenTelemetry Collector (deployed as DaemonSet or Deployment)
+- **OTel Ingestor** — Receives OTLP from apps, load-balances to Aggregator nodes
+- **OTel Aggregator** — Groups spans by trace, then exports in **parallel** to two downstream paths
 
 **Rules:**
-- Applications MUST export spans via OTLP protocol (gRPC preferred for performance)
-- OpenTelemetry Collector endpoint: `otel-collector:4317` (gRPC) or `:4318` (HTTP)
-- Collector MUST perform the following functions:
-  - **Batching**: Aggregate spans to reduce network overhead (batch size: 512-1024 spans)
+- Applications MUST export spans via OTLP/gRPC to the Ingestor (`otel-ingestor:4317`)
+- Ingestor MUST load-balance across all Aggregator pods using headless DNS resolver
+- Aggregator MUST perform:
+  - **Group-by-trace**: Collect all spans for a trace before forwarding (`groupbytrace` processor)
+  - **Batching**: Aggregate spans to reduce network overhead
   - **Retry logic**: Exponential backoff for failed exports (max retries: 3)
-  - **Backpressure handling**: Queue management to prevent data loss during spikes
   - **Attribute normalization**: Standardize attribute names and values
-  - **Governance enforcement**: Validate required attributes, drop invalid spans
+- Aggregator MUST export to **both paths simultaneously** (parallel fan-out):
+  - **Path 1** → Redpanda `traces` topic (Kafka exporter)
+  - **Path 2** → Grafana Tempo via OTLP/gRPC
 
-**Collector Configuration:**
+**Aggregator Configuration (Dual Export):**
 ```yaml
 receivers:
   otlp:
@@ -204,142 +217,123 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
+  groupbytrace:
+    wait_duration: 3s
+    num_traces: 1000
   batch:
     send_batch_size: 1024
     timeout: 10s
-  
-  attributes:
-    actions:
-      - key: cluster.name
-        value: "prod-k8s-cluster"
-        action: upsert
 
 exporters:
+  # Path 1: AI/ML pipeline via Redpanda
   kafka:
     brokers:
       - redpanda.redpanda.svc.cluster.local:9092
     topic: "traces"
     encoding: "otlp_proto"
+  # Path 2: Direct trace storage via Tempo
+  otlp/tempo:
+    endpoint: "tempo.tempo.svc.cluster.local:4317"
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [groupbytrace, batch]
+      exporters: [kafka, otlp/tempo]  # parallel fan-out
 ```
 
 **Evidence:**
 - OpenTelemetry Collector: https://opentelemetry.io/docs/collector/
+- Kafka Exporter: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/kafkaexporter
 
-### WF-004: Streaming Backbone (Redpanda)
+### WF-004: Streaming Backbone — Path 1 (Redpanda → Preprocessing → Anomaly Detection)
 
-**Stage:** Central event streaming hub for trace data
+**Stage:** AI/ML pipeline triggered by OTel Aggregator's Kafka export
 
 **Components:**
-- Redpanda cluster (Kafka-compatible)
+- Redpanda cluster (Kafka-compatible, two topics)
+- Preprocessing Serving (consumer + transformer)
+- Anomaly Detection Serving (ML inference)
+
+**Data Flow:**
+```
+OTel Aggregator
+  └─► Redpanda [topic: traces]
+        └─► Preprocessing Serving (consumer-group: preprocessing-group)
+              └─► Redpanda [topic: traces-preprocessed]
+                    └─► Anomaly Detection Serving (consumer-group: anomaly-group)
+                          └─► AWS S3 [bucket: anomaly-data]  (Parquet/Snappy, anomalies only)
+```
 
 **Rules:**
-- Redpanda MUST act as the **single source of truth** for streaming trace data
-- **ONLY Anomaly Detection AI Model** consumes from Redpanda (single consumer)
-- All other components (Tempo, RCA) read from MinIO, not Redpanda
-- Applications MUST NOT bypass Redpanda and send traces directly to consumers
-- Topic configuration:
-  - Topic name: `traces`
-  - Partitions: Scale based on throughput (recommended: 3-6 partitions for development, 12+ for production)
-  - Replication factor: 3 (for production), 1 (for development/thesis)
-  - Retention: Short retention (1-3 days) since AI model processes in real-time
-  - Compression: `snappy` or `lz4` for optimal performance
+- **Topic `traces`**: Raw OTLP spans from OTel Aggregator
+  - Partitions: 3-6 (development), 12+ (production)
+  - Replication factor: 1 (dev/thesis), 3 (production)
+  - Retention: 1-3 days
+  - Compression: `snappy`
+  - Consumer group: `preprocessing-group` (Preprocessing Serving ONLY)
+- **Topic `traces-preprocessed`**: Feature-engineered trace data
+  - Same partition/retention settings as `traces`
+  - Consumer group: `anomaly-group` (Anomaly Detection Serving ONLY)
+- Preprocessing Serving MUST:
+  - Normalize span attributes
+  - Extract features (latency, error rate, dependency graph)
+  - Publish enriched records to `traces-preprocessed`
+- Anomaly Detection Serving MUST:
+  - Run ML inference on preprocessed features
+  - Store **only anomalous traces** to `s3://anomaly-data/` in Parquet/Snappy format
+  - Path: `date=YYYY-MM-DD/service=<name>/trace_<id>.parquet`
 
-**Topic Configuration:**
+**Topic Setup:**
 ```bash
+# Create both topics
 kubectl exec -n redpanda redpanda-0 -- rpk topic create traces \
-  --partitions 3 \
-  --replicas 1 \
+  --partitions 3 --replicas 1 \
+  --topic-config retention.ms=259200000 \
+  --topic-config compression.type=snappy
+
+kubectl exec -n redpanda redpanda-0 -- rpk topic create traces-preprocessed \
+  --partitions 3 --replicas 1 \
   --topic-config retention.ms=259200000 \
   --topic-config compression.type=snappy
 ```
 
-**Consumer Group:**
-- `anomaly-detection-group`: ONLY consumer - AI Anomaly Detection service
-
 **Evidence:**
 - Redpanda Kafka compatibility: https://docs.redpanda.com/25.2/
 
-### WF-005: AI-Driven Processing & Forwarding
+### WF-005: Direct Trace Storage — Path 2 (OTel Aggregator → Tempo)
 
-**Stage:** AI model processes all traces and forwards to downstream services
+**Stage:** Real-time trace ingestion into Grafana Tempo for visualization
 
 **Components:**
-- Anomaly Detection AI Model (primary data processor)
-- Grafana Tempo (trace ingestion)
-- AWS S3 (storage for anomalies)
+- OTel Aggregator (OTLP exporter)
+- Grafana Tempo (trace ingestion + query engine)
+- AWS S3 `tempo-traces` bucket (Tempo's native backend storage)
 
 **Rules:**
-- Anomaly Detection AI Model is the **ONLY consumer** of Redpanda traces
-- AI Model MUST process ALL traces in real-time
-- For each trace, AI Model performs **dual actions**:
+- OTel Aggregator MUST export ALL traces to Tempo via OTLP/gRPC **in parallel** with the Redpanda export
+- Tempo endpoint: `tempo.tempo.svc.cluster.local:4317`
+- Protocol: OTLP gRPC (insecure, internal cluster)
+- Tempo stores ALL traces (normal + anomaly) in `s3://tempo-traces/` using its native block format
+- Grafana OSS queries Tempo via HTTP for trace search and visualization
+- This path is **independent of the AI pipeline** — traces appear in Grafana regardless of AI processing status
 
-**Action 1: Forward to Tempo (ALL traces)**
-- AI Model MUST forward ALL traces (normal + anomaly) to Grafana Tempo via OTLP/gRPC
-- Endpoint: `tempo-distributor.tempo.svc.cluster.local:4317`
-- Protocol: OTLP gRPC
-- **Purpose**: Tempo ingests and stores traces in its own S3 backend
+**Rationale for Dual Export:**
+| Path | Destination | Data | Purpose |
+|------|------------|------|---------|
+| Path 1 | Redpanda → AI pipeline | ALL traces | ML preprocessing + anomaly detection |
+| Path 2 | Tempo directly | ALL traces | Immediate observability / human review |
 
-**Action 2: Store Anomalous Traces (ONLY anomalies)**
-- If anomaly detected, AI Model MUST store complete anomalous trace to S3 bucket `anomaly-data`
-- Path structure: `s3://anomaly-data/date=YYYY-MM-DD/service=<name>/trace_<id>.parquet`
-- Format: **Parquet with Snappy compression** (5-10x smaller than JSON)
-- Rationale: Optimizes storage cost and training pipeline performance (columnar access)
-- **Purpose**: Fast access for RCA without querying Tempo
-
-**AI Model Output Schema:**
-```json
-{
-  "tempo_forward": {
-    "status": "forwarded",
-    "endpoint": "tempo-distributor:4317",
-    "trace_id": "abc123..."
-  },
-  "anomaly_result": {
-    "is_anomaly": true,
-    "anomaly_score": 0.95,
-    "anomaly_type": "latency_spike",
-    "affected_services": ["user-service"],
-    "s3_storage": "s3://anomaly-data/date=2026-01-24/service=user-service/trace_abc123.parquet"
-  }
-}
-```
-
-**Implementation Example (AI Model):**
-```python
-import pyarrow as pa
-import pyarrow.parquet as pq
-from datetime import datetime
-
-# After anomaly detection
-if is_anomaly:
-    # Convert trace to Arrow Table
-    trace_table = pa.Table.from_pydict({
-        'trace_id': [trace['trace_id']],
-        'service_name': [trace['service_name']],
-        'timestamp': [trace['timestamp']],
-        'spans': [trace['spans']],  # Nested structure supported
-        'anomaly_score': [anomaly_score],
-        'anomaly_type': [anomaly_type]
-    })
-    
-    # Write to S3 with Snappy compression
-    s3_path = f"s3://anomaly-data/date={date}/service={service}/trace_{trace_id}.parquet"
-    pq.write_table(
-        trace_table,
-        s3_path,
-        compression='snappy',
-        use_dictionary=True  # Additional compression for repeated values
-    )
-```
-
-**Storage Benefits:**
-- **Compression**: 5-10x smaller than JSON (typically 1GB JSON → 100-200MB Parquet)
-- **Columnar Access**: Training pipeline can read only needed columns
-- **Schema Evolution**: Can add fields without breaking old readers
-- **Industry Standard**: Compatible with Spark, Athena, Pandas
+**Storage Benefits (Tempo → S3):**
+- **Compression**: Parquet/Snappy blocks managed by Tempo
+- **Columnar Access**: Airflow training pipeline can read via Tempo API
+- **Retention**: 30 days (managed by Tempo compactor)
 
 **Evidence:**
-- Tempo OTLP: https://grafana.com/docs/tempo/v2.9.x/api_docs/
+- Tempo OTLP ingestion: https://grafana.com/docs/tempo/v2.9.x/api_docs/
 - AWS S3: https://aws.amazon.com/s3/
 - Apache Parquet: https://parquet.apache.org/
 
@@ -591,11 +585,11 @@ extract_data >> train_model >> register_model
 
 **Cross-cutting rules for the entire workflow:**
 
-1. **Single Consumer Pattern**: Redpanda has ONLY ONE consumer (Anomaly Detection AI Model). This simplifies the architecture and ensures all trace processing goes through ML pipeline.
+1. **Dual-Path Export**: OTel Aggregator exports ALL traces to **both** Redpanda (AI pipeline) and Tempo (observability) in parallel. Neither path blocks the other.
 
-2. **AWS S3 as Central Storage**: AWS S3 acts as the central data lake. All downstream services (Tempo, RCA, Training) read from S3, not from Redpanda.
+2. **AWS S3 as Central Storage**: AWS S3 acts as the central data lake. Tempo writes to `tempo-traces`, Anomaly Detection writes to `anomaly-data`, MLflow writes to `ml-models`.
 
-3. **AI Model as Gateway**: Anomaly Detection AI Model acts as the gateway between streaming (Redpanda) and storage (S3). All traces pass through AI model for analysis before storage.
+3. **Staged AI Pipeline**: Traces flow through two Redpanda topics — `traces` (raw) → Preprocessing Serving → `traces-preprocessed` → Anomaly Detection Serving. This separation allows independent scaling of each stage.
 
 3. **Backpressure Handling**: Every component MUST handle backpressure gracefully:
    - OpenTelemetry Collector: Queue limits and sampling
@@ -641,22 +635,20 @@ extract_data >> train_model >> register_model
 | `ml-models` | ML model artifacts | **MLflow** | MLflow / Airflow | Model Serving, AI Model | Serialized models (pickle, ONNX) | Versioned (last N) |
 
 **Corrected Data Flow:**
-1. **All traces**: OTel Collector → Redpanda → **AI Model** → **Tempo (ingest)** → S3 `tempo-traces` (Tempo writes)
-2. **Anomaly traces**: AI Model → S3 `anomaly-data` bucket (complete trace for fast RCA)
+1. **All traces (Path 1)**: OTel Aggregator → Redpanda `traces` → Preprocessing Serving → Redpanda `traces-preprocessed` → Anomaly Detection Serving → S3 `anomaly-data` (anomalies only)
+2. **All traces (Path 2)**: OTel Aggregator → Grafana Tempo (OTLP/gRPC) → S3 `tempo-traces` (Tempo writes ALL traces)
 3. **Tempo storage**: Tempo manages `tempo-traces` bucket structure (blocks, compaction, indexing)
-4. **RCA analysis**: RCA reads complete traces from S3 `anomaly-data` bucket (no Tempo query needed)
-5. **Training data**: 
+4. **RCA analysis**: RCA reads complete anomalous traces from S3 `anomaly-data` (no Tempo query needed)
+5. **Training data**:
    - Normal traces: Airflow queries Tempo API
    - Anomaly traces: Airflow reads from S3 `anomaly-data`
    - Models: Airflow → MLflow → S3 `ml-models` bucket
 
 **Key Design Decisions:**
-- **Single Consumer**: Only AI Model consumes from Redpanda → simplifies architecture
-- **AI as Gateway**: All traces forwarded to Tempo via AI → ensures ML processing before storage
-- **Tempo Owns Storage**: `tempo-traces` bucket structure entirely managed by Tempo (not AI Model)
-- **Duplicate Anomaly Storage**: Anomalous traces exist in BOTH `tempo-traces` (via Tempo) and `anomaly-data` (AI Model)
-  - **Rationale**: Fast RCA access without Tempo query overhead
-  - **Trade-off**: Storage cost vs. RCA performance
+- **Dual Export by OTel Aggregator**: Aggregator fans out to both Redpanda and Tempo independently (no single point of failure)
+- **Staged AI Pipeline**: Two-topic Redpanda design decouples preprocessing from inference — each service scales independently
+- **Tempo Independent of AI**: Traces visible in Grafana immediately, even if AI pipeline is down
+- **Tempo Owns Storage**: `tempo-traces` bucket structure entirely managed by Tempo (blocks, compaction, indexing)
 - **S3 Role**: Pure object storage layer, no intelligence about data structure
 - **Cost Optimization**: S3 lifecycle policies reduce storage costs by moving old data to cheaper tiers
 

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otel-collector.aggregator.name" . }}
+  labels:
+    {{- include "otel-collector.aggregator.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: "0.0.0.0:13133"
+    
+    processors:
+      batch:
+        {{- toYaml .Values.aggregator.otel_config.processors.batch | nindent 8 }}
+      groupbytrace:
+        {{- toYaml .Values.aggregator.otel_config.processors.groupbytrace | nindent 8 }}
+      
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:{{ .Values.aggregator.service.ports.grpc }}
+          http:
+            endpoint: 0.0.0.0:{{ .Values.aggregator.service.ports.http }}
+      
+    exporters:
+      otlp/tempo:
+        {{- toYaml .Values.aggregator.otel_config.exporters.otlp | nindent 8 }}
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [groupbytrace,batch]
+          exporters: [otlp/tempo]
