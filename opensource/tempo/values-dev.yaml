@@ -4,6 +4,10 @@
 # Backend Storage: AWS S3 (tempo-traces bucket)
 
 tempo:
+  # CRITICAL: Required for ${ENV_VAR} expansion in config.
+  # Without this, Tempo sends literal "${AWS_ACCESS_KEY_ID}" to AWS.
+  extraArgs:
+    config.expand-env: "true"
   resources:
     requests:
       cpu: 100m
@@ -29,7 +33,7 @@ tempo:
     trace:
       backend: s3
       s3:
-        bucket: pqhung-tempo-traces  # Tempo owns this bucket structure
+        bucket: pqhung-tempo-traces-2  # Tempo owns this bucket structure
         endpoint: s3.amazonaws.com
         region: ap-southeast-1
         # Credentials from Kubernetes Secret (see Phase 4.2.1 in task.plan)
@@ -57,8 +61,9 @@ tempo:
 persistence:
   enabled: true
   size: 5Gi  # Only for WAL buffer, not trace storage
-  storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+  storageClassName: "ebs-sc"  # Use EBS CSI StorageClass
 
 # Service configuration
 service:
-  type: ClusterIP
+  type: NodePort
+  nodePort: 30310  # Tempo HTTP query API — access via node IP:30310

@@ -195,10 +195,7 @@
   console:
     enabled: true
   ```
-- [x] Validate YAML syntax
-  ```bash
-  # Can use: yamllint values-dev.yaml
-  ```
+
 
 ### 2.3 Create Tempo Configuration
 - [x] Create `d:\MyRCA\opensource\tempo\values-dev.yaml`
@@ -370,7 +367,7 @@
 - [ ] Login to AWS Console (https://console.aws.amazon.com/)
 - [ ] Navigate to S3 service
 - [ ] Create bucket with following settings:
-  - **Bucket name:** `pqhung-tempo-traces`
+  - **Bucket name:** `pqhung-tempo-traces-1`
   - **Region:** Asia Pacific (Singapore) `ap-southeast-1`
   - **Block Public Access:** Enable (all checkboxes)
   - **Bucket Versioning:** Enable (recommended)
@@ -403,10 +400,10 @@
 - [x] Install Tempo using Helm (monolithic mode)
   ```bash
   helm install tempo grafana/tempo \
-    --version 1.23.3 \
-    --namespace tempo \
-    -f d:\MyRCA\opensource\tempo\values-dev.yaml \
-    --timeout 5m
+  --version 1.23.3 \
+  --namespace tempo \
+  -f /d/MyRCA/opensource/tempo/values-dev.yaml \
+  --timeout 5m
   ```
 - [ ] Apply secret environment variables patch
   ```bash
@@ -527,3 +524,61 @@
 
 **Phase 5 Status:** ✅ Completed
 
+---
+
+## Phase 6: Deploy OTel Collector
+
+### 6.1 Configuration Summary
+| Component | NodePort | Purpose |
+|-----------|----------|---------|
+| Grafana | 30300 | Web UI |
+| Tempo | 30310 | HTTP Query API |
+| Redpanda Console | 30320 | Web UI |
+| Redpanda Kafka | 30392 | Kafka API |
+
+OTel Collector Aggregator exports traces → **Grafana Tempo** via `otlp/tempo` (OTLP/gRPC).  
+Redpanda export deferred to Phase 7.
+
+### 6.2 Deploy OTel Collector
+- [x] Install OTel Collector using local Helm chart
+  ```bash
+  helm upgrade --install otel-collector d:\MyRCA\opensource\otel-collector \
+    --namespace otel \
+    --create-namespace
+  ```
+- [x] Wait for rollout
+  ```bash
+  kubectl rollout status deployment/otel-collector-ingestor -n otel --timeout=3m
+  kubectl rollout status deployment/otel-collector-aggregator -n otel --timeout=3m
+  ```
+
+### 6.3 Verify Deployment
+- [ ] Check pods and services
+  ```bash
+  kubectl get pods,svc -n otel
+  # Expected: ingestor (Running), aggregator (Running)
+  ```
+- [ ] Check aggregator ConfigMap has otlp/tempo exporter
+  ```bash
+  kubectl get configmap -n otel otel-collector-aggregator -o yaml
+  ```
+- [ ] Check aggregator logs — no exporter errors
+  ```bash
+  kubectl logs -n otel deploy/otel-collector-aggregator --tail=50
+  ```
+
+### 6.4 End-to-End Smoke Test
+- [ ] Send test trace to Ingestor
+  ```bash
+  # Port-forward ingestor if needed
+  kubectl port-forward -n otel svc/otel-collector-ingestor 4317:4317
+
+  # Send trace using telemetrygen (install: go install github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@latest)
+  telemetrygen traces --otlp-insecure --traces 5
+  ```
+- [ ] Verify trace appears in Grafana Tempo
+  - Open Grafana: `http://<NODE-IP>:30300`
+  - Navigate to Explore → Tempo datasource
+  - Run a search — traces should appear
+
+**Phase 6 Status:** In Progress

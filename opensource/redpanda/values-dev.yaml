@@ -34,3 +34,14 @@ external:
 # Redpanda Console (optional web UI)
 console:
   enabled: true
+  service:
+    type: NodePort
+    nodePort: 30320  # Redpanda Console UI — access via node IP:30320
+
+# External listener for Kafka clients outside cluster
+listeners:
+  kafka:
+    external:
+      default:
+        port: 9094
+        nodePort: 30392  # Kafka API — access via node IP:30392
