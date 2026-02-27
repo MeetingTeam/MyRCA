@@ -26,11 +26,14 @@ This AI-Rule specification defines a **simplified governance framework** for dep
 
 ```mermaid
 graph TD
-    A[Sample Applications] -->|OTLP Traces| B[Tempo]
-    B -->|Tracing Data| C[Grafana]
-    D[Redpanda<br/>1 broker] -->|Metrics| C
-    C -->|Datasource| B
-    C -->|Visualization| E[Demo/Learning]
+    A[Application - OTel Agent] -->|OTLP Traces| B[OTel Collector<br/>Ingestor → Aggregator]
+    B -->|Path 2| C[Tempo]
+    B -->|Path 1| D[Redpanda<br/>1 broker]
+    D --> E[Preprocessing Service]
+    E --> F[Anomaly Detection<br/>Transformer AE]
+    F --> G[DuckDB → AWS S3]
+    C -->|Tracing Data| H[Grafana OSS]
+    C -->|Store traces| I[AWS S3]
 ```
 
 ---
@@ -88,7 +91,7 @@ The platform implements a **dual-path, parallel export architecture** where dist
 
 ```mermaid
 graph TB
-    A["Kubernetes Apps"] -->|OTLP gRPC| B["OTel Ingestor"]
+    A["Application (OTel Agent)"] -->|OTLP gRPC| B["OTel Ingestor"]
     B -->|Load-balance OTLP| C["OTel Aggregator"]
 
     %% Parallel fork
@@ -96,23 +99,15 @@ graph TB
     C -->|"Path 2: Direct Tracing"| H["Grafana Tempo"]
 
     %% Path 1 – AI/ML pipeline
-    D -->|"Consumer: preprocessing-group"| E["Preprocessing Serving"]
-    E -->|"Publishes: topic: traces-preprocessed"| F["Redpanda (topic: traces-preprocessed)"]
-    F -->|"Consumer: anomaly-group"| G["Anomaly Detection Serving"]
-    G -->|"Store anomaly traces (Parquet/Snappy)"| S1["AWS S3 - anomaly-data"]
-    S1 -->|Read for RCA| I["RCA Service"]
-    I -->|Notify| J["Discord / Alerts"]
+    D -->|"Consumer: preprocessing-group"| E["Preprocessing Service"]
+    E -->|"Publishes: topic: preprocess-data<br/>key: service/operation/http_status"| F["Redpanda (topic: preprocess-data)"]
+    F -->|"Consumer: anomaly-group<br/>batch 500-1000 msgs"| G["Anomaly Detection Serving API<br/>(Transformer Autoencoder)"]
+    G -->|"Write Parquet via DuckDB"| DK["DuckDB (OLAP layer)"]
+    DK -->|"Store dataset (Parquet)"| S1["AWS S3 (Parquet dataset)"]
 
     %% Path 2 – Tempo
     H -->|Store ALL traces natively| S2["AWS S3 - tempo-traces"]
     H <-->|Query| K["Grafana OSS"]
-
-    %% Training loop
-    S2 -->|Normal trace data| L["Airflow Pipeline"]
-    S1 -->|Anomaly training data| L
-    L -->|Train| M["MLflow"]
-    M -->|Model artifacts| S3["AWS S3 - ml-models"]
-    S3 -->|Load models| G
 ```
 
 ### WF-001: Request Ingress & Trace Initialization
@@ -254,19 +249,25 @@ service:
 **Stage:** AI/ML pipeline triggered by OTel Aggregator's Kafka export
 
 **Components:**
-- Redpanda cluster (Kafka-compatible, two topics)
-- Preprocessing Serving (consumer + transformer)
-- Anomaly Detection Serving (ML inference)
+- Redpanda cluster (Kafka-compatible, two topics: `traces`, `preprocess-data`)
+- Preprocessing Service (consumer + feature extractor)
+- Anomaly Detection Serving API (sequence-based ML inference via Transformer Autoencoder)
+- DuckDB (embedded OLAP for writing Parquet to S3)
+- AWS S3 (Parquet dataset storage)
 
 **Data Flow:**
 ```
 OTel Aggregator
   └─► Redpanda [topic: traces]
-        └─► Preprocessing Serving (consumer-group: preprocessing-group)
-              └─► Redpanda [topic: traces-preprocessed]
-                    └─► Anomaly Detection Serving (consumer-group: anomaly-group)
-                          └─► AWS S3 [bucket: anomaly-data]  (Parquet/Snappy, anomalies only)
+        └─► Preprocessing Service (consumer-group: preprocessing-group)
+              └─► Redpanda [topic: preprocess-data]
+                    │  key: <service>/<operation>/<http_status>
+                    └─► Anomaly Detection Serving API (consumer-group: anomaly-group)
+                          └─► DuckDB (OLAP layer)
+                                └─► AWS S3 (Parquet dataset)
 ```
+
+#### WF-004a: Topic Configuration
 
 **Rules:**
 - **Topic `traces`**: Raw OTLP spans from OTel Aggregator
@@ -274,18 +275,14 @@ OTel Aggregator
   - Replication factor: 1 (dev/thesis), 3 (production)
   - Retention: 1-3 days
   - Compression: `snappy`
-  - Consumer group: `preprocessing-group` (Preprocessing Serving ONLY)
-- **Topic `traces-preprocessed`**: Feature-engineered trace data
+  - Consumer group: `preprocessing-group` (Preprocessing Service ONLY)
+- **Topic `preprocess-data`**: Feature-engineered trace data
   - Same partition/retention settings as `traces`
-  - Consumer group: `anomaly-group` (Anomaly Detection Serving ONLY)
-- Preprocessing Serving MUST:
-  - Normalize span attributes
-  - Extract features (latency, error rate, dependency graph)
-  - Publish enriched records to `traces-preprocessed`
-- Anomaly Detection Serving MUST:
-  - Run ML inference on preprocessed features
-  - Store **only anomalous traces** to `s3://anomaly-data/` in Parquet/Snappy format
-  - Path: `date=YYYY-MM-DD/service=<name>/trace_<id>.parquet`
+  - **Partition key**: `<service_name>/<operation_name>/<http_status>`
+  - Consumer group: `anomaly-group` (Anomaly Detection Serving API ONLY)
+
+> [!IMPORTANT]
+> Sử dụng partition key `<service>/<operation>/<http_status>` đảm bảo các bản ghi cùng context sẽ được ghi vào cùng một partition của topic đích, giúp các instance của mô hình phát hiện bất thường nhận được chuỗi span có cùng context theo đúng thứ tự từ một partition duy nhất.
 
 **Topic Setup:**
 ```bash
@@ -295,7 +292,7 @@ kubectl exec -n redpanda redpanda-0 -- rpk topic create traces \
   --topic-config retention.ms=259200000 \
   --topic-config compression.type=snappy
 
-kubectl exec -n redpanda redpanda-0 -- rpk topic create traces-preprocessed \
+kubectl exec -n redpanda redpanda-0 -- rpk topic create preprocess-data \
   --partitions 3 --replicas 1 \
   --topic-config retention.ms=259200000 \
   --topic-config compression.type=snappy
@@ -303,6 +300,121 @@ kubectl exec -n redpanda redpanda-0 -- rpk topic create traces-preprocessed \
 
 **Evidence:**
 - Redpanda Kafka compatibility: https://docs.redpanda.com/25.2/
+
+#### WF-004b: Preprocessing Service
+
+**Stage:** Feature extraction and data enrichment from raw spans
+
+**Mechanism:**
+1. Đọc dữ liệu raw log từ OTel Collector thông qua Redpanda topic `traces`
+2. Trích xuất các feature cần thiết từ raw log: `operation`, `duration`, `service`, v.v.
+3. Đẩy dữ liệu vào Redpanda topic `preprocess-data` với key `<tên service>/<tên operation>/<http status>`
+
+**Rules:**
+- Preprocessing Service MUST consume from topic `traces` (consumer group: `preprocessing-group`)
+- MUST extract features: operation name, duration, service name, HTTP status, error info
+- MUST publish enriched records to topic `preprocess-data`
+- **Partition key format**: `<service_name>/<operation_name>/<http_status>`
+  - Example: `user-service/GET /api/users/200`
+  - This ensures spans with the same context land on the same partition
+
+**Code Reference:**
+- https://github.com/MeetingTeam/ml-anomaly-detection/blob/main/src/data_preprocessing.py
+
+#### WF-004c: Anomaly Detection Serving API
+
+**Stage:** Sequence-based anomaly detection using Transformer Autoencoder
+
+**Role:**
+- Là service chạy mô hình phát hiện bất thường theo chuỗi (sequence-based anomaly detection model)
+- Tiêu thụ dữ liệu đã được tiền xử lý, nhóm dữ liệu theo context để tạo thành các chuỗi span
+- Tính toán điểm bất thường (anomaly score) cho từng chuỗi
+- Kết quả phát hiện cùng dữ liệu đầu vào được lưu trữ vào AWS S3 dưới dạng Parquet thông qua DuckDB
+
+**Model:** Transformer Autoencoder (có thể thay đổi sau này)
+
+**Mechanism:**
+1. Đọc dữ liệu từ topic `preprocess-data` theo batch (mỗi batch khoảng 500-1000 message). Service này có khả năng scale với mỗi consumer sẽ đọc mỗi partition từ topic
+2. Convert dữ liệu và scale sang dạng vector (tham khảo hàm `preprocess_test_df` trong `evaluate.py`)
+3. Phân loại các span theo nhóm (`service/operation/http_status`) và chia mỗi nhóm thành các chuỗi 20 span (xem hàm `build_sequences` trong `evaluate.py`)
+4. Chạy model để ra anomaly score cho các chuỗi (xem hàm `evaluate_model` trong `evaluate.py`)
+5. So sánh anomaly score với threshold score để xác định span đó có bất thường hay không
+6. Đẩy toàn bộ thông tin thu được vào AWS S3 bucket bằng thư viện DuckDB dưới dạng Parquet
+
+**Rules:**
+- MUST consume from topic `preprocess-data` (consumer group: `anomaly-group`)
+- Batch size: 500-1000 messages per batch
+- MUST group spans by context key (`service/operation/http_status`)
+- MUST build sequences of 20 spans per group
+- MUST compute anomaly score using Transformer Autoencoder
+- MUST compare score against configurable threshold
+- MUST store ALL results (both normal and anomalous) to AWS S3 via DuckDB in Parquet format
+- MUST set `TIMESTAMP_NS` data type on timestamp column for time-based querying
+
+**Code Reference:**
+- https://github.com/MeetingTeam/ml-anomaly-detection/tree/main/src/transformer_ae
+
+#### WF-004d: DuckDB OLAP Layer
+
+**Stage:** Embedded analytical database for writing and querying Parquet datasets on AWS S3
+
+**Description:**
+DuckDB là hệ quản trị cơ sở dữ liệu phân tích (OLAP) dạng nhúng, được sử dụng để xử lý, lưu trữ và truy vấn dữ liệu dạng cột trực tiếp trên các file dataset trong AWS S3, phù hợp cho các tác vụ phân tích offline, huấn luyện và đánh giá mô hình machine learning.
+
+**Rules:**
+- DuckDB MUST be used as the write layer from Anomaly Detection Serving API to AWS S3
+- MUST use `httpfs` extension for S3 connectivity
+- MUST format data as **Parquet** with date-based partitioning
+- MUST set timestamp columns as `TIMESTAMP_NS` to support nanosecond-precision OTel timestamps
+- MUST use `OVERWRITE_OR_IGNORE` mode for idempotent writes
+
+**DuckDB S3 Write Example:**
+```python
+import duckdb
+import pandas as pd
+
+# 1. Prepare data (replace with your actual DataFrame)
+data = {
+    'timestamp': [1716372000000000000, 1716372060000000000],  # Nanoseconds (OTel standard)
+    'trace_id': ['tr-001', 'tr-002'],
+    'anomaly_score': [0.12, 0.85],
+    'is_anomaly': [False, True]
+}
+df = pd.DataFrame(data)
+
+# 2. Connect DuckDB (in-memory for fast processing)
+con = duckdb.connect()
+
+# 3. Configure S3 connection
+con.execute("INSTALL httpfs; LOAD httpfs;")
+con.execute(f"""
+    SET s3_endpoint='s3.amazonaws.com';
+    SET s3_region='ap-southeast-1';
+    SET s3_access_key_id='your-access-key';
+    SET s3_secret_access_key='your-secret-key';
+    SET s3_use_ssl=true;
+""")
+
+# 4. Write DataFrame to S3 as Parquet with TIMESTAMP_NS
+con.execute("""
+    COPY (
+        SELECT
+            timestamp::TIMESTAMP_NS as timestamp,
+            trace_id,
+            anomaly_score,
+            is_anomaly,
+            current_date as date_part  -- Used for partitioning
+        FROM df
+    )
+    TO 's3://anomaly-dataset/data.parquet'
+    (FORMAT PARQUET, PARTITION_BY (date_part), OVERWRITE_OR_IGNORE 1);
+""")
+```
+
+**Evidence:**
+- DuckDB: https://duckdb.org/
+- DuckDB S3 support: https://duckdb.org/docs/extensions/httpfs/s3api.html
+- Apache Parquet: https://parquet.apache.org/
 
 ### WF-005: Direct Trace Storage — Path 2 (OTel Aggregator → Tempo)
 
@@ -327,15 +439,9 @@ kubectl exec -n redpanda redpanda-0 -- rpk topic create traces-preprocessed \
 | Path 1 | Redpanda → AI pipeline | ALL traces | ML preprocessing + anomaly detection |
 | Path 2 | Tempo directly | ALL traces | Immediate observability / human review |
 
-**Storage Benefits (Tempo → S3):**
-- **Compression**: Parquet/Snappy blocks managed by Tempo
-- **Columnar Access**: Airflow training pipeline can read via Tempo API
-- **Retention**: 30 days (managed by Tempo compactor)
-
 **Evidence:**
 - Tempo OTLP ingestion: https://grafana.com/docs/tempo/v2.9.x/api_docs/
 - AWS S3: https://aws.amazon.com/s3/
-- Apache Parquet: https://parquet.apache.org/
 
 ### WF-006: Tempo Storage & Query Engine
 
@@ -347,7 +453,7 @@ kubectl exec -n redpanda redpanda-0 -- rpk topic create traces-preprocessed \
 - Grafana OSS (visualization)
 
 **Rules:**
-- Grafana Tempo MUST receive traces from AI Model via OTLP protocol
+- Grafana Tempo MUST receive traces from OTel Aggregator via OTLP protocol
 - Tempo acts as **active ingester** and **storage owner**
 - Tempo MUST use AWS S3 bucket `tempo-traces` as its **native backend object storage**
 - **Tempo owns the data structure**: Block format, compaction, retention are managed by Tempo
@@ -395,227 +501,43 @@ compactor:
 - Tempo S3 backend: https://grafana.com/docs/tempo/v2.9.x/configuration/#s3
 - Tempo architecture: https://grafana.com/docs/tempo/v2.9.x/operations/architecture/
 
-### WF-007: Root Cause Analysis from Anomaly Storage
-
-**Stage:** Automated RCA using stored anomalous traces
-
-**Components:**
-- RCA Service (orchestration and analysis)
-- AWS S3 `anomaly-data` bucket (anomalous traces)
-- Notification Service (Discord, Slack, PagerDuty)
-
-**Rules:**
-- RCA Service MUST periodically scan AWS S3 bucket `anomaly-data` for new anomalies
-- Execution frequency: Every 5-15 minutes (configurable)
-- Anomaly traces are **complete, self-contained** (stored by AI Model)
-- RCA does NOT need to fetch from Tempo (faster analysis)
-- RCA logic MUST identify:
-  - **Suspected root-cause service**: Service with earliest anomalous span in trace
-  - **Impacted downstream dependencies**: Services affected by cascading failures
-  - **Correlation with infrastructure events**: Deployment changes, scaling events (optional)
-- RCA output MUST include:
-  - Root cause hypothesis (ranked by confidence)
-  - Trace visualization links (Grafana Tempo URLs for human review)
-  - Recommended remediation actions (runbook links)
-- Notifications MUST be sent to configured channels:
-  - **Discord webhook**: For team collaboration
-  - **Slack**: For production incidents
-  - **PagerDuty**: For critical alerts requiring immediate response
-
-**RCA Data Access Pattern:**
-```python
-# 1. Scan anomaly-data bucket
-import boto3
-s3_client = boto3.client('s3')
-anomalies = s3_client.list_objects_v2(Bucket='anomaly-data', Prefix='date=2026-01-24/')
-
-# 2. For each anomaly, read complete trace (self-contained)
-import pyarrow.parquet as pq
-for anomaly_file in anomalies['Contents']:
-    # Read Parquet file from S3
-    s3_path = f"s3://anomaly-data/{anomaly_file['Key']}"
-    table = pq.read_table(s3_path)
-    full_trace = table.to_pydict()  # Convert to Python dict
-    
-    # 3. Perform RCA on complete trace
-    root_cause = analyze_trace(full_trace)
-    
-    # 4. Generate Tempo URL for human investigation
-    tempo_url = f"http://grafana.local/tempo/trace/{full_trace['trace_id']}"
-```
-
-**Evidence:**
-- AWS Boto3 SDK: https://boto3.amazonaws.com/v1/documentation/api/latest/index.html
-- AWS S3: https://aws.amazon.com/s3/
-
-### WF-008: Notification & Alerting
-
-**Stage:** Automated RCA and alerting
-
-**Components:**
-- RCA Service (orchestration and analysis)
-- Notification Service (Discord, Slack, PagerDuty)
-- MinIO (anomaly trace storage)
-
-**Rules:**
-- RCA Service MUST periodically read **anomalous traces** from MinIO bucket `anomaly-data`
-- Execution frequency: Every 5-15 minutes (configurable)
-- **Data Source**: Complete trace data stored by Anomaly Detection service (not Tempo)
-- RCA logic MUST identify:
-  - **Suspected root-cause service**: Service with earliest anomalous span in trace
-  - **Impacted downstream dependencies**: Services affected by cascading failures
-  - **Correlation with infrastructure events**: Deployment changes, scaling events (optional)
-- RCA output MUST include:
-  - Root cause hypothesis (ranked by confidence)
-  - Trace visualization links (Grafana Tempo URLs)
-  - Recommended remediation actions (runbook links)
-- Notifications MUST be sent to configured channels:
-  - **Discord webhook**: For team collaboration
-  - **Slack**: For production incidents
-  - **PagerDuty**: For critical alerts requiring immediate response
-
-**Discord Notification Format:**
-```json
-{
-  "username": "AIOps RCA Bot",
-  "embeds": [{
-    "title": "🚨 Anomaly Detected: High Latency in user-service",
-    "color": 15158332,
-    "fields": [
-      {
-        "name": "Root Cause",
-        "value": "database-service: Connection pool exhaustion",
-        "inline": false
-      },
-      {
-        "name": "Affected Services",
-        "value": "user-service, order-service, payment-service",
-        "inline": false
-      },
-      {
-        "name": "Trace Link",
-        "value": "[View in Grafana](http://grafana.local/trace/abc123)",
-        "inline": false
-      }
-    ],
-    "timestamp": "2026-01-24T21:00:00Z"
-  }]
-}
-```
-
-**Evidence:**
-- Discord Webhooks: https://discord.com/developers/docs/resources/webhook
-
-### WF-009: Continuous Learning & Model Governance
-
-**Stage:** ML model training, versioning, and deployment
-
-**Components:**
-- Apache Airflow (workflow orchestration)
-- MLflow (model tracking and registry)
-- Model Serving Service (inference)
-- AWS S3 (training data source and model artifacts storage)
-- Grafana Tempo (for querying historical normal traces)
-
-**Rules:**
-- Airflow MUST orchestrate periodic model training pipelines
-  - Training frequency: Weekly or triggered by data drift detection
-  - **Data sources**: 
-    - **Normal traces**: Query via Tempo API (Tempo manages `tempo-traces` bucket)
-    - **Anomaly traces**: Direct read from S3 `anomaly-data` bucket
-- Training pipeline steps:
-  1. Data extraction from S3
-  2. Feature engineering (calculate aggregate metrics)
-  3. Model training (anomaly detection models)
-  4. Model evaluation (validation metrics)
-  5. Model registration in MLflow
-  6. Model artifact upload to S3
-- MLflow MUST track:
-  - Model parameters and hyperparameters
-  - Training metrics (precision, recall, F1-score)
-  - Model lineage and versioning
-  - Experiment comparison
-- Model artifacts MUST be stored in AWS S3:
-  - Bucket: `ml-models`
-  - Path: `s3://ml-models/model_name/version_X/`
-  - Format: Serialized model files (pickle, ONNX, TensorFlow SavedModel)
-- Model Serving Service MUST:
-  - Load latest approved model version from MLflow registry
-  - Support A/B testing between model versions
-  - Enable dynamic model updates without service restart
-  - Expose model metadata and health endpoints
-
-**Airflow DAG Example:**
-```python
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-
-dag = DAG(
-    'anomaly_detection_training',
-    schedule_interval='@weekly',
-    default_args={'retries': 2}
-)
-
-extract_data = PythonOperator(
-    task_id='extract_traces_from_s3',
-    python_callable=extract_s3_data,
-    dag=dag
-)
-
-train_model = PythonOperator(
-    task_id='train_anomaly_model',
-    python_callable=train_model_fn,
-    dag=dag
-)
-
-register_model = PythonOperator(
-    task_id='register_to_mlflow',
-    python_callable=register_mlflow,
-    dag=dag
-)
-
-extract_data >> train_model >> register_model
-```
-
-**Evidence:**
-- Apache Airflow: https://airflow.apache.org/
-- MLflow: https://mlflow.org/
-
-### WF-010: Data Flow Governance Principles
+### WF-007: Data Flow Governance Principles
 
 **Cross-cutting rules for the entire workflow:**
 
 1. **Dual-Path Export**: OTel Aggregator exports ALL traces to **both** Redpanda (AI pipeline) and Tempo (observability) in parallel. Neither path blocks the other.
 
-2. **AWS S3 as Central Storage**: AWS S3 acts as the central data lake. Tempo writes to `tempo-traces`, Anomaly Detection writes to `anomaly-data`, MLflow writes to `ml-models`.
+2. **AWS S3 as Central Storage**: AWS S3 acts as the central data lake:
+   - `tempo-traces`: Managed by Tempo for full trace storage
+   - `anomaly-dataset`: Written by Anomaly Detection Serving API via DuckDB (Parquet format)
 
-3. **Staged AI Pipeline**: Traces flow through two Redpanda topics — `traces` (raw) → Preprocessing Serving → `traces-preprocessed` → Anomaly Detection Serving. This separation allows independent scaling of each stage.
+3. **Staged AI Pipeline**: Traces flow through two Redpanda topics — `traces` (raw) → Preprocessing Service → `preprocess-data` (feature-engineered, keyed by `service/operation/http_status`) → Anomaly Detection Serving API. This separation allows independent scaling of each stage.
 
-3. **Backpressure Handling**: Every component MUST handle backpressure gracefully:
+4. **DuckDB as OLAP Layer**: DuckDB provides embedded analytical processing for writing Parquet datasets to S3 and supports offline querying for model training and evaluation.
+
+5. **Backpressure Handling**: Every component MUST handle backpressure gracefully:
    - OpenTelemetry Collector: Queue limits and sampling
    - Redpanda: Consumer lag monitoring
    - Tempo: Rate limiting on ingestion
 
-4. **Data Quality**: Invalid or malformed traces MUST be logged and dropped, not silently ignored.
+6. **Data Quality**: Invalid or malformed traces MUST be logged and dropped, not silently ignored.
 
-5. **Observability of Observability**: The observability platform itself MUST be monitored:
+7. **Observability of Observability**: The observability platform itself MUST be monitored:
    - Redpanda lag metrics
    - Tempo ingestion rate
    - Anomaly detection processing latency
    - Model inference latency
 
-6. **Security & Access Control**:
+8. **Security & Access Control**:
    - AWS S3 MUST use IAM roles or access keys with least-privilege policies
-   - S3 buckets MUST have separate IAM policies per service (Tempo, RCA, Airflow)
+   - S3 buckets MUST have separate IAM policies per service (Tempo, Anomaly Detection)
    - For thesis: IAM user with programmatic access is acceptable
    - Redpanda topics SHOULD use ACLs (optional for thesis)
-   - MLflow SHOULD implement authentication (optional for thesis)
 
-7. **Storage Management**:
+9. **Storage Management**:
    - AWS S3 buckets:
-     - `traces`: Lifecycle policy to transition to Glacier after 90 days, delete after 365 days
-     - `anomaly-data`: Lifecycle policy to delete after 90 days
-     - `ml-models`: Versioning enabled, keep last N versions via lifecycle rules
+     - `tempo-traces`: Retention managed by Tempo compactor (30 days)
+     - `anomaly-dataset`: Lifecycle policy to delete after 90 days
    - Redpanda retention SHOULD match business requirements (1-3 days default)
    - Sampling rates SHOULD balance between coverage and cost
 
@@ -624,33 +546,36 @@ extract_data >> train_model >> register_model
 **AWS S3 Overview:**
 - AWS S3 serves as cloud object storage for the entire platform
 - Region: ap-southeast-1 (or your preferred region)
-- Access: Via AWS SDK (boto3 for Python, AWS SDK for Java, etc.)
+- Access: Via AWS SDK (boto3 for Python) and DuckDB httpfs extension
 
-**Three Storage Buckets:**
+**Two Storage Buckets:**
 
 | Bucket Name | Purpose | Owner/Manager | Written By | Read By | Data Format | Retention |
 |-------------|---------|---------------|------------|---------|-------------|-----------|
-| `tempo-traces` | ALL distributed traces | **Grafana Tempo** | Tempo (ingester) | Tempo (querier), Airflow (via Tempo API) | Tempo's internal format (vParquet blocks) | 30 days (Tempo compactor) |
-| `anomaly-data` | Complete anomalous traces | **AI Model** | AI Model | RCA Service, Airflow | **Parquet with Snappy compression** (complete trace data) | 90 days |
-| `ml-models` | ML model artifacts | **MLflow** | MLflow / Airflow | Model Serving, AI Model | Serialized models (pickle, ONNX) | Versioned (last N) |
+| `tempo-traces` | ALL distributed traces | **Grafana Tempo** | Tempo (ingester) | Tempo (querier), Grafana OSS | Tempo's internal format (vParquet blocks) | 30 days (Tempo compactor) |
+| `anomaly-dataset` | Anomaly detection results + input data | **Anomaly Detection Serving API** | DuckDB (from Anomaly Detection) | DuckDB (OLAP queries), Training pipelines | **Parquet** (date-partitioned, TIMESTAMP_NS) | 90 days |
 
-**Corrected Data Flow:**
-1. **All traces (Path 1)**: OTel Aggregator → Redpanda `traces` → Preprocessing Serving → Redpanda `traces-preprocessed` → Anomaly Detection Serving → S3 `anomaly-data` (anomalies only)
-2. **All traces (Path 2)**: OTel Aggregator → Grafana Tempo (OTLP/gRPC) → S3 `tempo-traces` (Tempo writes ALL traces)
+**Data Flow Summary:**
+1. **All traces (Path 1)**: OTel Aggregator → Redpanda `traces` → Preprocessing Service → Redpanda `preprocess-data` (key: `service/operation/http_status`) → Anomaly Detection Serving API → DuckDB → AWS S3 `anomaly-dataset`
+2. **All traces (Path 2)**: OTel Aggregator → Grafana Tempo (OTLP/gRPC) → AWS S3 `tempo-traces` (Tempo writes ALL traces)
 3. **Tempo storage**: Tempo manages `tempo-traces` bucket structure (blocks, compaction, indexing)
-4. **RCA analysis**: RCA reads complete anomalous traces from S3 `anomaly-data` (no Tempo query needed)
-5. **Training data**:
-   - Normal traces: Airflow queries Tempo API
-   - Anomaly traces: Airflow reads from S3 `anomaly-data`
-   - Models: Airflow → MLflow → S3 `ml-models` bucket
 
 **Key Design Decisions:**
 - **Dual Export by OTel Aggregator**: Aggregator fans out to both Redpanda and Tempo independently (no single point of failure)
 - **Staged AI Pipeline**: Two-topic Redpanda design decouples preprocessing from inference — each service scales independently
+- **Partition Key Strategy**: Using `service/operation/http_status` as key ensures context-aware partitioning for sequence-based anomaly detection
+- **DuckDB as Write/Query Layer**: Embedded OLAP provides efficient Parquet writes to S3 without additional infrastructure
 - **Tempo Independent of AI**: Traces visible in Grafana immediately, even if AI pipeline is down
 - **Tempo Owns Storage**: `tempo-traces` bucket structure entirely managed by Tempo (blocks, compaction, indexing)
-- **S3 Role**: Pure object storage layer, no intelligence about data structure
-- **Cost Optimization**: S3 lifecycle policies reduce storage costs by moving old data to cheaper tiers
+
+### Future Work (Not in Current Pipeline)
+
+The following components are planned for future iterations but are **not part of the current active workflow**:
+
+- **RCA Service**: Automated root cause analysis from anomaly data stored in S3
+- **Notification Service**: Discord/Slack/PagerDuty alerting on detected anomalies
+- **Airflow Pipeline**: Periodic model retraining workflow orchestration
+- **MLflow**: Model versioning, tracking, and registry
 
 ---
 

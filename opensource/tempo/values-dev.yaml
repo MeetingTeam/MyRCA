@@ -10,11 +10,11 @@ tempo:
     config.expand-env: "true"
   resources:
     requests:
-      cpu: 100m
-      memory: 256Mi
+      cpu: 250m
+      memory: 512Mi
     limits:
-      cpu: 500m
-      memory: 1Gi
+      cpu: 1000m
+      memory: 2Gi
   
   # OTLP receivers - receives traces from AI Anomaly Detection Model
   # AI Model forwards ALL traces (normal + anomaly) via OTLP/gRPC
@@ -64,6 +64,7 @@ persistence:
   storageClassName: "ebs-sc"  # Use EBS CSI StorageClass
 
 # Service configuration
+# Tempo has no UI — only accessed internally by Grafana & AI Model
+# Use 'kubectl port-forward -n tempo svc/tempo 3100:3100' for local debugging
 service:
-  type: NodePort
-  nodePort: 30310  # Tempo HTTP query API — access via node IP:30310
+  type: ClusterIP

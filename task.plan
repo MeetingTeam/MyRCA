@@ -466,7 +466,7 @@
   helm install grafana grafana/grafana \
     --version 9.2.10 \
     --namespace grafana \
-    -f d:\MyRCA\opensource\grafana\values-dev.yaml \
+    -f /d/MyRCA/opensource/grafana/values-dev.yaml \
     --timeout 5m
   ```
   **Note:** Helm chart version 9.2.10 includes Grafana OSS app version 12.0.2

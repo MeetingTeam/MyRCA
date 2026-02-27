@@ -76,6 +76,9 @@ aggregator:
         num_traces: 1000
     
     exporters:
+      file:
+        path: /otel/otel-traces.jsonl
+        format: json
       otlp:
         endpoint: "tempo.tempo.svc.cluster.local:4317"
         tls:

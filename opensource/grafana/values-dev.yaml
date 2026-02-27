@@ -6,8 +6,8 @@ replicas: 1
 # Persistence for dashboards
 persistence:
   enabled: true
-  size: 1Gi
-  storageClass: "ebs-sc"  # Use EBS CSI StorageClass
+  size: 1Gi  
+  storageClassName: "ebs-sc"  
 
 # Resources
 resources:
@@ -30,7 +30,7 @@ datasources:
       - name: Tempo
         type: tempo
         access: proxy
-        url: http://tempo.tempo.svc.cluster.local:3100
+        url: http://tempo.tempo.svc.cluster.local:3200
         isDefault: true
         editable: true
         jsonData:
