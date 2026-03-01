@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redpanda-init-topics
+  namespace: redpanda
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 300  # Auto-cleanup sau 5 phút
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init-topics
+          image: redpandadata/redpanda:v25.1.3
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              echo "⏳ Waiting for Redpanda to be ready..."
+              until rpk cluster health --api-urls redpanda.redpanda.svc.cluster.local:9644 2>/dev/null; do
+                echo "Redpanda not ready yet, retrying in 5s..."
+                sleep 5
+              done
+
+              echo "✅ Redpanda is ready. Creating topics..."
+
+              rpk topic create traces \
+                --brokers redpanda.redpanda.svc.cluster.local:9093 \
+                --partitions 3 --replicas 1 \
+                --topic-config retention.ms=259200000 \
+                --topic-config compression.type=snappy \
+                || echo "Topic 'traces' already exists"
+
+              rpk topic create preprocess-data \
+                --brokers redpanda.redpanda.svc.cluster.local:9093 \
+                --partitions 3 --replicas 1 \
+                --topic-config retention.ms=259200000 \
+                --topic-config compression.type=snappy \
+                || echo "Topic 'preprocess-data' already exists"
+
+              echo "📋 Current topics:"
+              rpk topic list --brokers redpanda.redpanda.svc.cluster.local:9093
+
+              echo "✅ Topic initialization complete!"
