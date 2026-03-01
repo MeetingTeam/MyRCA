@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preprocessing-service
+  namespace: preprocessing
+  labels:
+    app: preprocessing-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: preprocessing-service
+  template:
+    metadata:
+      labels:
+        app: preprocessing-service
+    spec:
+      containers:
+        - name: preprocessing-service
+          image: asdads6495/preprocessing-service:dev
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: preprocessing-service-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      restartPolicy: Always

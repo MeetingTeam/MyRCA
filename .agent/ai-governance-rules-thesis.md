@@ -100,7 +100,7 @@ graph TB
 
     %% Path 1 – AI/ML pipeline
     D -->|"Consumer: preprocessing-group"| E["Preprocessing Service"]
-    E -->|"Publishes: topic: preprocess-data<br/>key: service/operation/http_status"| F["Redpanda (topic: preprocess-data)"]
+    E -->|"Publishes: topic: preprocess-data<br/>key: service/operation/http_status/instance_id"| F["Redpanda (topic: preprocess-data)"]
     F -->|"Consumer: anomaly-group<br/>batch 500-1000 msgs"| G["Anomaly Detection Serving API<br/>(Transformer Autoencoder)"]
     G -->|"Write Parquet via DuckDB"| DK["DuckDB (OLAP layer)"]
     DK -->|"Store dataset (Parquet)"| S1["AWS S3 (Parquet dataset)"]
@@ -261,7 +261,7 @@ OTel Aggregator
   └─► Redpanda [topic: traces]
         └─► Preprocessing Service (consumer-group: preprocessing-group)
               └─► Redpanda [topic: preprocess-data]
-                    │  key: <service>/<operation>/<http_status>
+                    │  key: <service>/<operation>/<http_status>/<service.instance.id>
                     └─► Anomaly Detection Serving API (consumer-group: anomaly-group)
                           └─► DuckDB (OLAP layer)
                                 └─► AWS S3 (Parquet dataset)
@@ -278,11 +278,14 @@ OTel Aggregator
   - Consumer group: `preprocessing-group` (Preprocessing Service ONLY)
 - **Topic `preprocess-data`**: Feature-engineered trace data
   - Same partition/retention settings as `traces`
-  - **Partition key**: `<service_name>/<operation_name>/<http_status>`
+  - **Partition key**: `<service_name>/<operation_name>/<http_status>/<service.instance.id>`
   - Consumer group: `anomaly-group` (Anomaly Detection Serving API ONLY)
 
 > [!IMPORTANT]
-> Sử dụng partition key `<service>/<operation>/<http_status>` đảm bảo các bản ghi cùng context sẽ được ghi vào cùng một partition của topic đích, giúp các instance của mô hình phát hiện bất thường nhận được chuỗi span có cùng context theo đúng thứ tự từ một partition duy nhất.
+> Sử dụng partition key `<service>/<operation>/<http_status>/<service.instance.id>` đảm bảo các bản ghi cùng context sẽ được ghi vào cùng một partition của topic đích, giúp các instance của mô hình phát hiện bất thường nhận được chuỗi span có cùng context theo đúng thứ tự từ một partition duy nhất.
+
+> [!NOTE]
+> `service.instance.id` là id định danh cho từng application instance (có thể hiểu là từng pod trong Kubernetes). Trường này nằm trong phần `resource.attributes` của resource trong span (theo OpenTelemetry Semantic Conventions).
 
 **Topic Setup:**
 ```bash
@@ -308,14 +311,14 @@ kubectl exec -n redpanda redpanda-0 -- rpk topic create preprocess-data \
 **Mechanism:**
 1. Đọc dữ liệu raw log từ OTel Collector thông qua Redpanda topic `traces`
 2. Trích xuất các feature cần thiết từ raw log: `operation`, `duration`, `service`, v.v.
-3. Đẩy dữ liệu vào Redpanda topic `preprocess-data` với key `<tên service>/<tên operation>/<http status>`
+3. Đẩy dữ liệu vào Redpanda topic `preprocess-data` với key `<tên service>/<tên operation>/<http status>/<service.instance.id>`
 
 **Rules:**
 - Preprocessing Service MUST consume from topic `traces` (consumer group: `preprocessing-group`)
 - MUST extract features: operation name, duration, service name, HTTP status, error info
 - MUST publish enriched records to topic `preprocess-data`
-- **Partition key format**: `<service_name>/<operation_name>/<http_status>`
-  - Example: `user-service/GET /api/users/200`
+- **Partition key format**: `<service_name>/<operation_name>/<http_status>/<service.instance.id>`
+  - Example: `user-service/GET /api/users/200/user-service-abc123`
   - This ensures spans with the same context land on the same partition
 
 **Code Reference:**
@@ -336,7 +339,7 @@ kubectl exec -n redpanda redpanda-0 -- rpk topic create preprocess-data \
 **Mechanism:**
 1. Đọc dữ liệu từ topic `preprocess-data` theo batch (mỗi batch khoảng 500-1000 message). Service này có khả năng scale với mỗi consumer sẽ đọc mỗi partition từ topic
 2. Convert dữ liệu và scale sang dạng vector (tham khảo hàm `preprocess_test_df` trong `evaluate.py`)
-3. Phân loại các span theo nhóm (`service/operation/http_status`) và chia mỗi nhóm thành các chuỗi 20 span (xem hàm `build_sequences` trong `evaluate.py`)
+3. Phân loại các span theo nhóm (`service/operation/http_status/service.instance.id`) và chia mỗi nhóm thành các chuỗi 20 span (xem hàm `build_sequences` trong `evaluate.py`)
 4. Chạy model để ra anomaly score cho các chuỗi (xem hàm `evaluate_model` trong `evaluate.py`)
 5. So sánh anomaly score với threshold score để xác định span đó có bất thường hay không
 6. Đẩy toàn bộ thông tin thu được vào AWS S3 bucket bằng thư viện DuckDB dưới dạng Parquet
@@ -344,7 +347,7 @@ kubectl exec -n redpanda redpanda-0 -- rpk topic create preprocess-data \
 **Rules:**
 - MUST consume from topic `preprocess-data` (consumer group: `anomaly-group`)
 - Batch size: 500-1000 messages per batch
-- MUST group spans by context key (`service/operation/http_status`)
+- MUST group spans by context key (`service/operation/http_status/service.instance.id`)
 - MUST build sequences of 20 spans per group
 - MUST compute anomaly score using Transformer Autoencoder
 - MUST compare score against configurable threshold
@@ -511,7 +514,7 @@ compactor:
    - `tempo-traces`: Managed by Tempo for full trace storage
    - `anomaly-dataset`: Written by Anomaly Detection Serving API via DuckDB (Parquet format)
 
-3. **Staged AI Pipeline**: Traces flow through two Redpanda topics — `traces` (raw) → Preprocessing Service → `preprocess-data` (feature-engineered, keyed by `service/operation/http_status`) → Anomaly Detection Serving API. This separation allows independent scaling of each stage.
+3. **Staged AI Pipeline**: Traces flow through two Redpanda topics — `traces` (raw) → Preprocessing Service → `preprocess-data` (feature-engineered, keyed by `service/operation/http_status/service.instance.id`) → Anomaly Detection Serving API. This separation allows independent scaling of each stage.
 
 4. **DuckDB as OLAP Layer**: DuckDB provides embedded analytical processing for writing Parquet datasets to S3 and supports offline querying for model training and evaluation.
 
@@ -556,14 +559,14 @@ compactor:
 | `anomaly-dataset` | Anomaly detection results + input data | **Anomaly Detection Serving API** | DuckDB (from Anomaly Detection) | DuckDB (OLAP queries), Training pipelines | **Parquet** (date-partitioned, TIMESTAMP_NS) | 90 days |
 
 **Data Flow Summary:**
-1. **All traces (Path 1)**: OTel Aggregator → Redpanda `traces` → Preprocessing Service → Redpanda `preprocess-data` (key: `service/operation/http_status`) → Anomaly Detection Serving API → DuckDB → AWS S3 `anomaly-dataset`
+1. **All traces (Path 1)**: OTel Aggregator → Redpanda `traces` → Preprocessing Service → Redpanda `preprocess-data` (key: `service/operation/http_status/service.instance.id`) → Anomaly Detection Serving API → DuckDB → AWS S3 `anomaly-dataset`
 2. **All traces (Path 2)**: OTel Aggregator → Grafana Tempo (OTLP/gRPC) → AWS S3 `tempo-traces` (Tempo writes ALL traces)
 3. **Tempo storage**: Tempo manages `tempo-traces` bucket structure (blocks, compaction, indexing)
 
 **Key Design Decisions:**
 - **Dual Export by OTel Aggregator**: Aggregator fans out to both Redpanda and Tempo independently (no single point of failure)
 - **Staged AI Pipeline**: Two-topic Redpanda design decouples preprocessing from inference — each service scales independently
-- **Partition Key Strategy**: Using `service/operation/http_status` as key ensures context-aware partitioning for sequence-based anomaly detection
+- **Partition Key Strategy**: Using `service/operation/http_status/service.instance.id` as key ensures context-aware partitioning for sequence-based anomaly detection
 - **DuckDB as Write/Query Layer**: Embedded OLAP provides efficient Parquet writes to S3 without additional infrastructure
 - **Tempo Independent of AI**: Traces visible in Grafana immediately, even if AI pipeline is down
 - **Tempo Owns Storage**: `tempo-traces` bucket structure entirely managed by Tempo (blocks, compaction, indexing)

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: preprocessing-service-config
+  namespace: preprocessing
+data:
+  KAFKA_BROKERS: "redpanda.redpanda.svc.cluster.local:9093"
+  INPUT_TOPIC: "traces"
+  OUTPUT_TOPIC: "preprocess-data"
+  CONSUMER_GROUP: "preprocessing-group"

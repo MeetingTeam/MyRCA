@@ -27,8 +27,8 @@ data:
     exporters:
       otlp/tempo:
         {{- toYaml .Values.aggregator.otel_config.exporters.otlp | nindent 8 }}
-      file:
-        {{- toYaml .Values.aggregator.otel_config.exporters.file | nindent 8 }}
+      kafka:
+        {{- toYaml .Values.aggregator.otel_config.exporters.kafka | nindent 8 }}
 
     service:
       extensions: [health_check]
@@ -36,4 +36,4 @@ data:
         traces:
           receivers: [otlp]
           processors: [groupbytrace,batch]
-          exporters: [otlp/tempo, file]
+          exporters: [otlp/tempo, kafka]
