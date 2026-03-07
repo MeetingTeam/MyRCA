@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies first (cache layer)
+COPY requirements-anomaly.txt .
+RUN pip install --no-cache-dir -r requirements-anomaly.txt
+
+# Copy shared modules
+COPY common/ common/
+COPY configs/ configs/
+
+# Copy model code and artifacts
+COPY transformer_ae/ transformer_ae/
+
+# Copy main service script
+COPY anomaly_detection_service.py .
+
+CMD ["python", "-u", "anomaly_detection_service.py"]

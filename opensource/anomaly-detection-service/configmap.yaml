@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: anomaly-detection-service-config
+  namespace: anomaly-detection
+data:
+  KAFKA_BROKERS: "redpanda.redpanda.svc.cluster.local:9093"
+  INPUT_TOPIC: "preprocess-data"
+  CONSUMER_GROUP: "anomaly-group"
+  BATCH_SIZE: "500"
+  ANOMALY_THRESHOLD: "0.5"
+  S3_ENDPOINT: "s3.amazonaws.com"
+  S3_REGION: "ap-southeast-7"
+  S3_BUCKET: "kltn-anomaly-dateset"
+  S3_USE_SSL: "true"
