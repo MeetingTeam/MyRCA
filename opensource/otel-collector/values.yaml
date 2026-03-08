@@ -72,7 +72,7 @@ aggregator:
         timeout: 3s
         send_batch_size: 1
       groupbytrace:
-        wait_duration: 3s
+        wait_duration: 10s
         num_traces: 1000
     
     exporters:

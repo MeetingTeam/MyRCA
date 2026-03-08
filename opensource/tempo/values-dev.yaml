@@ -32,6 +32,7 @@ tempo:
   storage:
     trace:
       backend: s3
+      blocklist_poll: 30s  # Poll S3 for new blocks every 30s (default: 5m)
       s3:
         bucket: pqhung-tempo-traces-2  # Tempo owns this bucket structure
         endpoint: s3.amazonaws.com
@@ -49,7 +50,7 @@ tempo:
   # Trace lifecycle management
   ingester:
     trace_idle_period: 10s
-    max_block_duration: 30m
+    max_block_duration: 2m  # Reduced from 30m for faster search availability
   
   # Compaction and retention (managed by Tempo)
   compactor:
