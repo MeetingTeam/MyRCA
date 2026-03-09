@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: system_failure_checker-configmap
+  namespace: rca
+data:
+  KAFKA_BROKERS: "redpanda.redpanda.svc.cluster.local:9093"
+  OUTPUT_TOPIC: "rca-task-data"
+
+  S3_ENDPOINT: "s3.amazonaws.com"
+  S3_REGION: "ap-southeast-7"
+  S3_BUCKET: "kltn-anomaly-dateset"
+  S3_USE_SSL: "true"
+
+  FAILURE_THRESHOLD: "0.5"
+  CHECK_INTERVAL_MINUTES: "1"
+  TIME_WINDOW_MINUTES: "1"

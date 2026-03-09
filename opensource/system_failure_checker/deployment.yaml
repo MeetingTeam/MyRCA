@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: system_failure_checker
+  namespace: rca
+  labels:
+    app: system_failure_checker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: system_failure_checker
+  template:
+    metadata:
+      labels:
+        app: system_failure_checker
+    spec:
+      containers:
+        - name: system_failure_checker
+          image: hungtran679/system_failure_checker:dev
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: system_failure_checker-config
+            - secretRef:
+                name: system_failure_checker-secret
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 10
+      restartPolicy: Always

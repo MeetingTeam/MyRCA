@@ -1,0 +1,4 @@
+confluent-kafka
+duckdb
+boto3
+requests

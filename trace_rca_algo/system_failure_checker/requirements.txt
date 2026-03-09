@@ -1,0 +1,5 @@
+duckdb
+fastapi
+apscheduler
+confluent-kafka
+uvicorn

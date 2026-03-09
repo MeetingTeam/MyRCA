@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: system_failure_checker-configmap
+  namespace: rca
+data:
+  KAFKA_BROKERS: "redpanda.redpanda.svc.cluster.local:9093"
+  INPUT_TOPIC: "rca-task-data"
+  CONSUMER_GROUP: "rca-service-group"
+
+  S3_ENDPOINT: "s3.amazonaws.com"
+  S3_REGION: "ap-southeast-7"
+  S3_BUCKET: "kltn-anomaly-dateset"
+  S3_USE_SSL: "true"
+  S3_KB_PATH: "s3://kltn-anomaly-dateset/knowledge_base.json"
