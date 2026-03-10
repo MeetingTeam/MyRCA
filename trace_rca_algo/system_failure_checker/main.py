@@ -66,9 +66,11 @@ def send_failure_notification(start_dt: datetime, end_dt: datetime):
     discord_time = f"<t:{int(start_dt.timestamp())}:f> to <t:{int(end_dt.timestamp())}:t>"
 
     message = f"""
-🚨 **System Failure Detected**
-**Time Window:** {discord_time}
-    Start running RCA algorithm to identify root causes and impacted services.
+    ## ⚡ Alert: System Failure
+    `Time Window:` {discord_time}
+    `Status:     ` 🔍 **Running RCA Algorithm**
+
+    Identifying root causes and impacted service dependencies...
     """
     payload = {"content": message}
     
@@ -185,9 +187,12 @@ def health_check():
     return {"message": "Service is healthy"}
 
 @app.get("/debug")
-def debug():
+def debug(
+    start_dt: datetime = None, 
+    end_dt: datetime = None
+):
     """Debug"""
-    check_current_failure()
+    check_system_failures(start_dt, end_dt)
     return {"message": "Manual check completed"}
 
 @app.get("/status")

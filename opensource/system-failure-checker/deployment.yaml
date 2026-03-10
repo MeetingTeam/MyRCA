@@ -1,29 +1,29 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: system_failure_checker
+  name: system-failure-checker
   namespace: rca
   labels:
-    app: system_failure_checker
+    app: system-failure-checker
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: system_failure_checker
+      app: system-failure-checker
   template:
     metadata:
       labels:
-        app: system_failure_checker
+        app: system-failure-checker
     spec:
       containers:
-        - name: system_failure_checker
-          image: hungtran679/system_failure_checker:dev
+        - name: system-failure-checker
+          image: hungtran679/system-failure-checker:dev
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
-                name: system_failure_checker-config
+                name: system-failure-checker-config
             - secretRef:
-                name: system_failure_checker-secret
+                name: system-failure-checker-secret
           resources:
             requests:
               cpu: 100m

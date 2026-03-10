@@ -1,29 +1,29 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: trace_rca_service
+  name: trace-rca-service
   namespace: rca
   labels:
-    app: trace_rca_service
+    app: trace-rca-service
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: trace_rca_service
+      app: trace-rca-service
   template:
     metadata:
       labels:
-        app: trace_rca_service
+        app: trace-rca-service
     spec:
       containers:
-        - name: trace_rca_service
-          image: hungtran679/trace_rca_service:dev
+        - name: trace-rca-service
+          image: hungtran679/trace-rca-service:dev
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
-                name: trace_rca_service-config
+                name: trace-rca-service-config
             - secretRef:
-                name: trace_rca_service-secret
+                name: trace-rca-service-secret
           resources:
             requests:
               cpu: 100m
