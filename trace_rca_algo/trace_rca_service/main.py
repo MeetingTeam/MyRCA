@@ -4,7 +4,7 @@ import os
 from confluent_kafka import Consumer, KafkaError, KafkaException
 import json
 import duckdb
-from datetime import datetime
+from datetime import datetime, timezone
 import boto3
 from urllib.parse import urlparse
 import requests
@@ -32,13 +32,28 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("trace-rca-service")
+# Persistent global DuckDB connection
+db_con = duckdb.connect(database=':memory:') 
 
 # ── Setup ──────────────────────────────────────────────────────────
+
+def init_duckdb_s3():
+    """Initialize S3 credentials and extensions once."""
+    log.info("Initializing DuckDB S3 Connection...")
+    db_con.execute("INSTALL httpfs; LOAD httpfs;")
+    db_con.execute(f"""
+        CREATE OR REPLACE SECRET (
+            TYPE S3,
+            KEY_ID '{AWS_ACCESS_KEY_ID}',
+            SECRET '{AWS_SECRET_ACCESS_KEY}',
+            REGION '{S3_REGION}',
+            URL_STYLE 'path'
+        );
+    """)
 
 def fetch_s3_json(s3_path):
     """
     Fetches a JSON object from S3 and converts it to a Python object.
-    Example: s3://bucket-name/path/to/file.json
     """
     # Parse the S3 URI (e.g., s3://my-bucket/key/path.json)
     parsed_url = urlparse(s3_path)
@@ -65,17 +80,6 @@ def query_spans_by_timestamp(start_dt, end_dt):
     Returns DataFrame with span data.
     """
     try:
-        con = duckdb.connect()
-        con.execute("INSTALL httpfs; LOAD httpfs;")
-        con.execute(f"""
-            SET s3_endpoint='{S3_ENDPOINT}';
-            SET s3_region='{S3_REGION}';
-            SET s3_access_key_id='{AWS_ACCESS_KEY_ID}';
-            SET s3_secret_access_key='{AWS_SECRET_ACCESS_KEY}';
-            SET s3_use_ssl={'true' if S3_USE_SSL else 'false'};
-            SET s3_url_style='path';
-        """)
-
         # Query spans within timestamp range
         query = f"""
             WITH anomalous_traces AS (
@@ -97,8 +101,7 @@ def query_spans_by_timestamp(start_dt, end_dt):
             start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
         ]
 
-        result_df = con.execute(query, params).fetchdf()
-        con.close()
+        result_df = db_con.cursor().execute(query, params).fetchdf()
 
         print(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
         return result_df
@@ -107,7 +110,7 @@ def query_spans_by_timestamp(start_dt, end_dt):
         print(f"Error querying spans: {e}")
         return None
 
-def send_rca_notification(ranking, anomalous_services, start_dt: datetime, end_dt: datetime):
+def send_rca_notification(ranking, start_dt: datetime, end_dt: datetime):
     """Post the RCA ranking results to a Discord channel via webhook."""
     if not DISCORD_WEBHOOK_URL:
         print("Discord webhook URL not configured, skipping notification")
@@ -119,8 +122,9 @@ def send_rca_notification(ranking, anomalous_services, start_dt: datetime, end_d
         rank_text += f"{medals[i]} `{svc}` (Score: {score:.4f})\n"
     
     # Discord Dynamic Markdown (Best for users in different timezones)
-    # <t:SECONDS:f> displays a short date/time like "March 8, 2024 10:30 PM"
-    discord_time = f"<t:{int(start_dt.timestamp())}:f> to <t:{int(end_dt.timestamp())}:t>"
+    start_ts = int(start_dt.replace(tzinfo=timezone.utc).timestamp())
+    end_ts = int(end_dt.replace(tzinfo=timezone.utc).timestamp())
+    discord_time = f"<t:{start_ts}:f> to <t:{end_ts}:t>"
 
     message = f"""
 🚨 **System Failure Detected**
@@ -128,7 +132,6 @@ def send_rca_notification(ranking, anomalous_services, start_dt: datetime, end_d
 
 **Top 3 Root Cause Microservices:**
 {rank_text}
-**All Anomalous Services:** {', '.join(anomalous_services)}
 
     """
     
@@ -155,39 +158,46 @@ def main():
 
     # Load Knowledge Base from S3
     kb = fetch_s3_json(S3_KB_PATH)
+    # Initialize DuckDB S3 connection
+    init_duckdb_s3()
+    
+    try: 
+        while True:
+            try:
+                msg = consumer.poll(timeout=1.0)
+                if msg is None or msg.error():
+                    continue
 
-    while True:
-        try:
-            msg = consumer.poll(timeout=1.0)
-            if msg is None or msg.error():
-                continue
+                record = json.loads(msg.value().decode("utf-8"))
+                if not "start_dt" in record or not "end_dt" in record:
+                    log.error("Missing start_dt or end_dt in record")
+                    continue
+                
+                # Convert timestamps to datetime objects
+                start_dt = datetime.fromisoformat(record.get("start_dt"))
+                end_dt = datetime.fromisoformat(record.get("end_dt"))
+                log.info(f"Processing RCA task: {start_dt} to {end_dt}")
 
-            record = json.loads(msg.value().decode("utf-8"))
-            if not "start_dt" in record or not "end_dt" in record:
-                log.error("Missing start_dt or end_dt in record")
-                continue
-            
-            # Convert timestamps to datetime objects
-            start_dt = datetime.fromisoformat(record.get("start_dt"))
-            end_dt = datetime.fromisoformat(record.get("end_dt"))
-            log.info(f"Processing RCA task: {start_dt} to {end_dt}")
+                # Query spans from S3
+                spans_df = query_spans_by_timestamp(start_dt, end_dt)
 
-            # Query spans from S3
-            spans_df = query_spans_by_timestamp(start_dt, end_dt)
+                if spans_df is None or spans_df.empty:
+                    print("No spans found for the given time range")
+                    continue
+                
+                traces = build_trace_dags_from_csv(spans_df)  # This will prepare the data structure for RCA
+                ranking = rank_root_causes(traces, kb)
+                print(f"RCA ranking: {ranking}")
 
-            if spans_df is None or spans_df.empty:
-                print("No spans found for the given time range")
-                continue
-            
-            traces = build_trace_dags_from_csv(spans_df)  # This will prepare the data structure for RCA
-            ranking = rank_root_causes(traces, kb)
-            print(f"RCA ranking: {ranking}")
+                send_rca_notification(ranking, start_dt, end_dt)
 
-            anomalous_services = spans_df[spans_df['is_anomaly'] == True]['service'].unique().tolist()
-            send_rca_notification(ranking, anomalous_services, start_dt, end_dt)
-
-        except Exception as e:
-            log.error(f"Error processing RCA task: {e}", exc_info=True)
+            except Exception as e:
+                log.error(f"Error processing RCA task: {e}", exc_info=True)
+    except Exception:
+        log.info("Shutting down RCA Service...")
+    finally:
+        consumer.close()
+        db_con.close()
 
 if __name__ == "__main__":
     main()

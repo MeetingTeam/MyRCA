@@ -1,23 +1,15 @@
-"""
-System Failure Checker Service
-──────────────────────────────
-FastAPI service with APScheduler that:
-  1. Every minute, queries S3 anomaly data via DuckDB
-  2. Counts abnormal/total spans per service/operation group
-  3. Prints "failure system" if abnormal ratio exceeds threshold
-"""
-
 import os
 import logging
-from datetime import datetime, timedelta
-
+import json
+import requests
 import duckdb
+from datetime import datetime, timedelta, timezone
+
 from fastapi import FastAPI
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from confluent_kafka import Producer, KafkaError, KafkaException
-import json
-import requests
+from confluent_kafka import Producer
+import uvicorn
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
@@ -30,77 +22,76 @@ S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
-FAILURE_THRESHOLD = float(os.getenv("FAILURE_THRESHOLD", "0.7"))
+FAILURE_THRESHOLD = float(os.getenv("FAILURE_THRESHOLD", "0.5"))
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "1"))
 TIME_WINDOW_MINUTES = int(os.getenv("TIME_WINDOW_MINUTES", "1"))
+APSCHEDULER_MAX_INSTANCES = int(os.getenv("APSCHEDULER_MAX_INSTANCES", "3"))
+APSCHEDULER_MISFIRE_GRACE_TIME = int(os.getenv("APSCHEDULER_MISFIRE_GRACE_TIME", "30"))
+
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# ── Setup ──────────────────────────────────────────────────────────
+# ── Global Objects ──────────────────────────────────────────────────────────
+app = FastAPI(title="System Failure Checker", version="1.1.0")
 scheduler = BackgroundScheduler()
+# Persistent global DuckDB connection
+db_con = duckdb.connect(database=':memory:') 
 
 producer = Producer({
-        "bootstrap.servers": KAFKA_BROKERS,
-        "linger.ms": 50
+    "bootstrap.servers": KAFKA_BROKERS,
+    "linger.ms": 50
 })
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("system-failure-checker")
 
-app = FastAPI(title="System Failure Checker", version="1.0.0")
-
+# ── Helper Functions ────────────────────────────────────────────────────────
 def _delivery_report(err, msg):
     if err:
-        log.error("Delivery failed for key=%s: %s", msg.key(), err)
+        log.error("Kafka Delivery failed: %s", err)
 
-def send_failure_notification(start_dt: datetime, end_dt: datetime):
-    """Post the system failure alert to a Discord channel via webhook."""
-    if not DISCORD_WEBHOOK_URL:
-        print("Discord webhook URL not configured, skipping notification")
-        return
+def init_duckdb_s3():
+    """Initialize S3 credentials and extensions once."""
+    log.info("Initializing DuckDB S3 Connection...")
+    db_con.execute("INSTALL httpfs; LOAD httpfs;")
+    db_con.execute(f"""
+        CREATE OR REPLACE SECRET (
+            TYPE S3,
+            KEY_ID '{AWS_ACCESS_KEY_ID}',
+            SECRET '{AWS_SECRET_ACCESS_KEY}',
+            REGION '{S3_REGION}',
+            URL_STYLE 'path'
+        );
+    """)
+
+def send_failure_notification(abnormal_services, start_dt, end_dt):
+    if not DISCORD_WEBHOOK_URL: return
     
-    # Discord Dynamic Markdown (Best for users in different timezones)
-    # <t:SECONDS:f> displays a short date/time like "March 8, 2024 10:30 PM"
-    discord_time = f"<t:{int(start_dt.timestamp())}:f> to <t:{int(end_dt.timestamp())}:t>"
-
+    start_ts = int(start_dt.replace(tzinfo=timezone.utc).timestamp())
+    end_ts = int(end_dt.replace(tzinfo=timezone.utc).timestamp())
+    discord_time = f"<t:{start_ts}:f> to <t:{end_ts}:t>"
+    
     message = f"""
-    ## ⚡ Alert: System Failure
-    `Time Window:` {discord_time}
-    `Status:     ` 🔍 **Running RCA Algorithm**
-
-    Identifying root causes and impacted service dependencies...
+## ⚡ Alert: System Failure
+`Time Window:` {discord_time}
+`Status:` 🔍 **Running RCA Algorithm**
+`Failure Services:` {', '.join(abnormal_services)}
     """
-    payload = {"content": message}
-    
     try:
-        resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
-        resp.raise_for_status()
-        print("Sent RCA notification to Discord")
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=5).raise_for_status()
     except Exception as e:
-        print(f"Failed to send Discord notification: {e}")
+        log.error(f"Discord notification failed: {e}")
 
-# ── DuckDB S3 Query Function ─────────────────────────────────────────────────
+# ── Core Logic ──────────────────────────────────────────────────────────────
 def check_system_failures(start_dt, end_dt):
-    """Query S3 data and check for system failures per service/operation group."""
+    """Query S3 data using the persistent global connection."""
     try:
-        con = duckdb.connect()
-        con.execute("INSTALL httpfs; LOAD httpfs;")
-        con.execute(f"""
-            SET s3_endpoint='{S3_ENDPOINT}';
-            SET s3_region='{S3_REGION}';
-            SET s3_access_key_id='{AWS_ACCESS_KEY_ID}';
-            SET s3_secret_access_key='{AWS_SECRET_ACCESS_KEY}';
-            SET s3_use_ssl={'true' if S3_USE_SSL else 'false'};
-            SET s3_url_style='path';
-        """)
-
-        # Query abnormal/total counts per service/operation
+        # Optimization: Use Hive Partitioning (date_part) to prune S3 files
         start_date_str = start_dt.strftime("%Y-%m-%d")
         end_date_str = end_dt.strftime("%Y-%m-%d")
         start_ts_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Querying spans from {start_ts_str} to {end_ts_str}...")
+
         query = f"""
             SELECT
                 service,
@@ -110,114 +101,70 @@ def check_system_failures(start_dt, end_dt):
                 ROUND(AVG(is_anomaly::INT), 4) as abnormal_ratio
             FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/*/*.parquet', hive_partitioning = 1)
             WHERE date_part BETWEEN '{start_date_str}' AND '{end_date_str}'
-                AND "timestamp" BETWEEN '{start_ts_str}'::TIMESTAMP AND '{end_ts_str}'::TIMESTAMP
+              AND "timestamp" BETWEEN '{start_ts_str}'::TIMESTAMP AND '{end_ts_str}'::TIMESTAMP
             GROUP BY service, operation
             HAVING abnormal_spans > 0
             ORDER BY abnormal_ratio DESC
-        """    
+        """
         
-        result = con.execute(query).fetchdf()
-        con.close()
+        # Use a cursor for thread-safety if multiple instances run
+        result = db_con.cursor().execute(query).fetchdf()
 
         if result.empty:
-            log.info("No data found in the last %d minutes", TIME_WINDOW_MINUTES)
+            log.info("No anomalies found in window %s to %s", start_ts_str, end_ts_str)
             return
 
-        log.info("Checked %d service/operation groups in last %d minutes",
-                len(result), TIME_WINDOW_MINUTES)
+        abnormal_services = result[result['abnormal_ratio'] > FAILURE_THRESHOLD]['service'].unique().tolist()
 
-        failures_found = False
-        for _, row in result.iterrows():
-            ratio = row['abnormal_ratio']
-            # print(f"{row['service']}/{row['operation']} - abnormal ratio: {ratio:.4f} ({int(row['abnormal_spans'])}/{int(row['total_spans'])})")
-            if ratio > FAILURE_THRESHOLD:
-                log.warning("FAILURE SYSTEM: %s/%s - abnormal ratio %.4f (threshold: %.4f) - %d/%d spans",
-                           row['service'], row['operation'], ratio, FAILURE_THRESHOLD,
-                           int(row['abnormal_spans']), int(row['total_spans']))
-                failures_found = True
-
-        if failures_found:
-            log.warning("One or more failure systems detected in the last %d minutes", TIME_WINDOW_MINUTES)
-            record = {
-                "start_dt": start_dt.isoformat(),
-                "end_dt": end_dt.isoformat(),
-            }
-            producer.produce(
-                    topic=OUTPUT_TOPIC,
-                    value=json.dumps(record).encode("utf-8"),
-                    callback=_delivery_report,
-            )
+        if abnormal_services:
+            log.warning("FAILURE DETECTED: %s", abnormal_services)
+            record = {"start_dt": start_dt.isoformat(), "end_dt": end_dt.isoformat()}
+            producer.produce(OUTPUT_TOPIC, json.dumps(record).encode("utf-8"), callback=_delivery_report)
             producer.flush()
-
-            # Send notification to Discord channel
-            send_failure_notification(start_dt, end_dt)
+            send_failure_notification(abnormal_services, start_dt, end_dt)
 
     except Exception as e:
-        log.error("Error checking system failures: %s", e, exc_info=True)
+        log.error("Error in check_system_failures: %s", e, exc_info=True)
 
 def check_current_failure():
-    """Check for failures in the last TIME_WINDOW_MINUTES minutes."""
-    end_dt = datetime.now()
+    end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
     start_dt = end_dt - timedelta(minutes=TIME_WINDOW_MINUTES)
     check_system_failures(start_dt, end_dt)
 
+# ── Lifecycle ───────────────────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
-    """Start the scheduler when FastAPI starts."""
+    init_duckdb_s3()
     scheduler.add_job(
         check_current_failure,
-        trigger=IntervalTrigger(hours=CHECK_INTERVAL_MINUTES),
+        trigger=IntervalTrigger(minutes=CHECK_INTERVAL_MINUTES),
         id="failure_check",
-        name="Check System Failures",
-        replace_existing=True
+        replace_existing=True,
+        max_instances=APSCHEDULER_MAX_INSTANCES,
+        misfire_grace_time=APSCHEDULER_MISFIRE_GRACE_TIME
     )
     scheduler.start()
-    log.info("System Failure Checker started - checking every %d minutes", CHECK_INTERVAL_MINUTES)
+    log.info("Service started. Interval: %dm, Threshold: %f", CHECK_INTERVAL_MINUTES, FAILURE_THRESHOLD)
 
 @app.on_event("shutdown")
 def shutdown_event():
-    """Shutdown the scheduler when FastAPI stops."""
     scheduler.shutdown()
-    log.info("System Failure Checker shutdown")
+    db_con.close()
+    log.info("Service shutdown.")
 
-# ── API Endpoints ────────────────────────────────────────────────────────────
-@app.get("/healthcheck")
-def health_check():
-    """Health check endpoint to verify service is running."""
-    return {"message": "Service is healthy"}
-
+# ── Endpoints ───────────────────────────────────────────────────────────────
 @app.get("/debug")
 def debug(
-    start_dt: datetime = None, 
+    start_dt: datetime = None,
     end_dt: datetime = None
 ):
     """Debug"""
     check_system_failures(start_dt, end_dt)
     return {"message": "Manual check completed"}
 
-@app.get("/status")
-def get_status():
-    """Get scheduler status."""
-    jobs = []
-    for job in scheduler.get_jobs():
-        jobs.append({
-            "id": job.id,
-            "name": job.name,
-            "next_run": str(job.next_run_time),
-            "trigger": str(job.trigger)
-        })
-
-    return {
-        "scheduler_running": scheduler.running,
-        "jobs": jobs,
-        "config": {
-            "threshold": FAILURE_THRESHOLD,
-            "interval_minutes": CHECK_INTERVAL_MINUTES,
-            "time_window_minutes": TIME_WINDOW_MINUTES,
-            "s3_bucket": S3_BUCKET
-        }
-    }
+@app.get("/healthcheck")
+def get_healthcheck():
+    return { "status": "ok" }
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)

@@ -3,3 +3,7 @@ fastapi
 apscheduler
 confluent-kafka
 uvicorn
+requests
+numpy
+pandas
+boto3

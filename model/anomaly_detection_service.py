@@ -117,6 +117,7 @@ def write_to_s3(result_df: pd.DataFrame):
                 raw_operation AS operation,
                 http_status,
                 duration_raw AS duration_ns,
+                kind,
                 span_status,
                 anomaly_score,
                 is_anomaly,
@@ -158,7 +159,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
 
     # Validate required columns
     required_cols = ["service", "operation", "http_status", "duration",
-                     "spanId", "parentSpanId", "traceId", "startTime", "span_status"]
+                     "spanId", "parentSpanId", "traceId", "startTime", "span_status", "kind"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         log.error("Missing required columns: %s — skipping batch", missing)

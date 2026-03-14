@@ -21,7 +21,7 @@ spec:
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
-                name: system-failure-checker-config
+                name: system-failure-checker-configmap
             - secretRef:
                 name: system-failure-checker-secret
           resources:
