@@ -1,0 +1,35 @@
+# Resource Quotas
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Backend Store (SQLite with Persistence)
+backendStore:
+  postgres:
+    enabled: false # Disable default DB if using SQLite
+  dbUrl: "sqlite:////app/mlflow.db"
+  persistence:
+    enabled: true
+    size: 1Gi
+    mountPath: /app
+    accessMode: ReadWriteOnce
+
+# Artifact Store (S3)
+artifactRoot: "s3://myrca-mlflow-artifacts/"
+extraEnvVars:
+  - name: AWS_ACCESS_KEY_ID
+    value: "YOUR_ACCESS_KEY"
+  - name: AWS_SECRET_ACCESS_KEY
+    value: "YOUR_SECRET_KEY"
+  - name: AWS_DEFAULT_REGION
+    value: "ap-southeast-7"
+
+# Web UI Service
+service:
+  type: NodePort
+  port: 5000
+  nodePort: 30002 # Fixed port for Web UI

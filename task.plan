@@ -582,3 +582,137 @@ Redpanda export deferred to Phase 7.
   - Run a search — traces should appear
 
 **Phase 6 Status:** In Progress
+
+---
+
+## Phase 7: Deploy Apache Airflow
+
+### 7.1 Helm Repository & Namespace Setup
+- [ ] Add Apache Airflow Helm repository
+  ```bash
+  helm repo add apache-airflow https://airflow.apache.org
+  helm repo update
+  ```
+- [ ] Create namespace for Airflow
+  ```bash
+  kubectl create namespace airflow
+  ```
+
+### 7.2 Create Airflow Configuration
+- [ ] Create `d:\MyRCA\opensource\airflow\values-dev.yaml`
+  ```yaml
+  # Airflow Development Configuration
+  # Using KubernetesExecutor
+  executor: KubernetesExecutor
+  
+  # Webserver UI settings
+  webserver:
+    service:
+      type: NodePort
+      ports:
+        - name: web
+          port: 8080
+          nodePort: 30330 # Access via http://<NODE-IP>:30330
+          
+  # Persistence for logs
+  logs:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClassName: ebs-sc
+
+  # Database configuration (using default PostgreSQL)
+  postgresql:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClassName: ebs-sc
+  ```
+
+### 7.3 Install Airflow
+- [ ] Install Airflow using Helm chart
+  ```bash
+  helm install airflow apache-airflow/airflow \
+    --namespace airflow \
+    -f d:\MyRCA\opensource\airflow\values-dev.yaml \
+    --timeout 15m
+  ```
+
+### 7.4 Verify Deployment
+- [ ] Check deployment status
+  ```bash
+  kubectl get pods,pvc,svc -n airflow
+  # Expected: airflow-webserver, airflow-scheduler, airflow-postgresql pods Running
+  ```
+- [ ] Access Airflow UI
+  ```bash
+  # Get default admin password
+  kubectl get secret --namespace airflow airflow-webserver -o jsonpath="{.data.webserver-secret-key}" | base64 --decode
+  # Access UI at http://<NODE-IP>:30330 (user: admin)
+  ```
+
+**Phase 7 Status:** Not Started
+
+---
+
+## Phase 8: Deploy MLflow
+
+### 8.1 Helm Repository & Namespace Setup
+- [ ] Add MLflow Helm repository
+  ```bash
+  helm repo add community-charts https://community-charts.github.io/helm-charts
+  helm repo update
+  ```
+- [ ] Create namespace for MLflow
+  ```bash
+  kubectl create namespace mlflow
+  ```
+
+### 8.2 Create MLflow Configuration
+- [ ] Create `d:\MyRCA\opensource\mlflow\values-dev.yaml`
+  ```yaml
+  # MLflow Development Configuration
+  backendStore:
+    # Using a persistent volume for the backend store
+    # For production, use a managed database like RDS
+    type: file
+    file:
+      path: /mlflow
+      pvc:
+        enabled: true
+        size: 5Gi
+        storageClass: ebs-sc
+        
+  # For artifact store, you can use S3. For simplicity here, we use a local path inside the container.
+  # For a more robust setup, configure an S3 bucket as artifactStore.
+  # artifactStore:
+  #   s3:
+  #     bucket: my-mlflow-artifacts-bucket
+  #     path: /mlflow-artifacts
+
+  service:
+    type: NodePort
+    nodePort: 30340 # Access via http://<NODE-IP>:30340
+  ```
+
+### 8.3 Install MLflow
+- [ ] Install MLflow using Helm chart
+  ```bash
+  helm install mlflow community-charts/mlflow \
+    --namespace mlflow \
+    -f d:\MyRCA\opensource\mlflow\values-dev.yaml \
+    --timeout 10m
+  ```
+
+### 8.4 Verify Deployment
+- [ ] Check deployment status
+  ```bash
+  kubectl get pods,pvc,svc -n mlflow
+  # Expected: mlflow-xxx pod Running
+  ```
+- [ ] Access MLflow UI
+  ```bash
+  # Access UI at http://<NODE-IP>:30340
+  ```
+
+**Phase 8 Status:** Not Started

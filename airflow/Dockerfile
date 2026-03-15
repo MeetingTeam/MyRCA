@@ -1,5 +1,5 @@
 # Use the official Airflow image as a base
-FROM apache/airflow:2.7.2
+FROM apache/airflow:2.10.0
 
 # Set the working directory inside the container
 WORKDIR /opt/airflow
