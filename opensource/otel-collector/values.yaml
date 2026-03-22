@@ -1,6 +1,6 @@
 image:
   repository: "otel/opentelemetry-collector-contrib"
-  tag: latest
+  tag: 0.148.0
   pullPolicy: IfNotPresent
   pullSecrets: []
 
@@ -26,8 +26,9 @@ ingestor:
       kafka:
         brokers:
           - redpanda.redpanda.svc.cluster.local:9093
-        topic: "traces"
-        encoding: "otlp_json"
+        traces:
+          encoding: "otlp_json"
+          topic: "traces"
 
   deployment:
     podAnnotations: {}
