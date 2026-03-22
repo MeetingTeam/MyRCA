@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: system-failure-checker
-          image: hungtran679/system-failure-checker:dev
+          image: hungtran679/system_failure_checker:dev
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

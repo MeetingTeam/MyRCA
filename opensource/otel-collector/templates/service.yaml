@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "otel-collector.ingestor.name" . }}
+  labels:
+    {{- include "otel-collector.ingestor.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.ingestor.service.type }}
+  ports:
+    {{- range $name, $svcPort := .Values.ingestor.service.ports}}
+    - name: {{$name}}
+      port: {{ $svcPort }}
+      targetPort: {{ $name }}
+      protocol: TCP
+  {{- end}}
+  selector:
+    {{- include "otel-collector.ingestor.selectorLabels" . | nindent 4 }}

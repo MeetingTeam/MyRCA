@@ -9,6 +9,9 @@ import boto3
 from urllib.parse import urlparse
 import requests
 import logging
+import mlflow
+import mlflow.pyfunc
+from mlflow import MlflowClient
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -25,6 +28,7 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 
 # Setup logging
 logging.basicConfig(
@@ -51,28 +55,37 @@ def init_duckdb_s3():
         );
     """)
 
-def fetch_s3_json(s3_path):
+def fetch_kb_from_mlflow(model_name):
     """
-    Fetches a JSON object from S3 and converts it to a Python object.
+    Fetches the Knowledge Base from MLflow using the production alias.
+    Returns the KB dictionary loaded from the model's artifacts.
     """
-    # Parse the S3 URI (e.g., s3://my-bucket/key/path.json)
-    parsed_url = urlparse(s3_path)
-    bucket_name = parsed_url.netloc
-    key = parsed_url.path.lstrip('/')
-
-    # Initialize S3 client (uses environment variables for credentials)
-    s3 = boto3.client(
-        's3',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=S3_REGION
-    )
-
-    # Get the object and read the body
-    response = s3.get_object(Bucket=bucket_name, Key=key)
-    content = response['Body'].read().decode('utf-8')
+    client = MlflowClient()
+    
+    try:
+        # Get the model version with the production alias
+        model_version = client.get_model_version_by_alias(
+            name=model_name,
+            alias="production"
+        )
+        run_id = model_version.run_id
+        log.info(f"Found production KB model version {model_version.version} from run {run_id}")
         
-    return json.loads(content)
+        # Download the KB artifact from the run
+        # The artifact is stored at kb_model/artifacts/kb_json
+        artifact_path = client.download_artifacts(run_id, "kb_model")
+        kb_file = os.path.join(artifact_path, "artifacts", "kb_json")
+        
+        # Load the KB JSON
+        with open(kb_file, "r") as f:
+            kb = json.load(f)
+        
+        log.info(f"Successfully loaded KB from MLflow (version {model_version.version})")
+        return kb
+        
+    except Exception as e:
+        log.error(f"Failed to fetch KB from MLflow: {e}", exc_info=True)
+        raise
 
 def query_spans_by_timestamp(start_dt, end_dt):
     """
@@ -156,8 +169,8 @@ def main():
     })
     consumer.subscribe([INPUT_TOPIC])
 
-    # Load Knowledge Base from S3
-    kb = fetch_s3_json(S3_KB_PATH)
+    # Load Knowledge Base from MLflow (production alias)
+    kb = fetch_kb_from_mlflow(MLFLOW_KB_MODEL)
     # Initialize DuckDB S3 connection
     init_duckdb_s3()
     

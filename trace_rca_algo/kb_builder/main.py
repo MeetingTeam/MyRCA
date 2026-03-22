@@ -22,6 +22,7 @@ DATASET_LIMIT = int(os.getenv("DATASET_LIMIT", "500000"))
 AIRFLOW_RUN_ID = os.getenv("AIRFLOW_RUN_ID", "manual_run")
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
+MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 
 # Initialize DuckDB connection
 db_con = duckdb.connect()
@@ -38,7 +39,6 @@ db_con.execute(f"""
 # Initialize MLflow (ensure your SQLite/Docker server is running)
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 client = MlflowClient()
-MODEL_NAME = "rca-knowledge-base"
 
 class KBModelWrapper(mlflow.pyfunc.PythonModel):
     """Wraps the KB JSON so MLflow can manage it as a Model."""
@@ -50,7 +50,7 @@ def get_production_kb():
     """Fetches the current production KB JSON data from MLflow."""
     try:
         # Load directly using the @production alias
-        model_uri = f"models:/{MODEL_NAME}@production"
+        model_uri = f"models:/{MLFLOW_KB_MODEL}@production"
         prod_model = mlflow.pyfunc.load_model(model_uri)
         # Access the raw dictionary from the wrapper
         return prod_model._model_impl.python_model.kb_data

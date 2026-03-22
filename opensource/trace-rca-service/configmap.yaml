@@ -9,7 +9,7 @@ data:
   CONSUMER_GROUP: "rca-service-group"
 
   S3_ENDPOINT: "s3.amazonaws.com"
-  S3_REGION: "ap-southeast-7"
-  S3_BUCKET: "kltn-anomaly-dateset"
+  S3_REGION: "us-east-1"
+  S3_BUCKET: "kltn-anomaly-dateset-1"
   S3_USE_SSL: "true"
   S3_KB_PATH: "s3://kltn-anomaly-dateset/knowledge_base.json"

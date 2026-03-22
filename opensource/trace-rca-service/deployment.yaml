@@ -17,11 +17,11 @@ spec:
     spec:
       containers:
         - name: trace-rca-service
-          image: hungtran679/trace-rca-service:dev
+          image: hungtran679/trace_rca_service:dev
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
-                name: trace-rca-service-config
+                name: trace-rca-service-configmap
             - secretRef:
                 name: trace-rca-service-secret
           resources:

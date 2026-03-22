@@ -8,8 +8,8 @@ data:
   OUTPUT_TOPIC: "rca-task-data"
 
   S3_ENDPOINT: "s3.amazonaws.com"
-  S3_REGION: "ap-southeast-7"
-  S3_BUCKET: "kltn-anomaly-dateset"
+  S3_REGION: "us-east-1"
+  S3_BUCKET: "kltn-anomaly-dateset-1"
   S3_USE_SSL: "true"
 
   FAILURE_THRESHOLD: "0.5"

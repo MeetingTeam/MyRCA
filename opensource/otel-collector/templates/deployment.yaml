@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "otel-collector.ingestor.name" . }}
+  labels:
+    {{- include "otel-collector.ingestor.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ingestor.deployment.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "otel-collector.ingestor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.ingestor.deployment.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "otel-collector.ingestor.labels" . | nindent 8 }}
+        {{- with .Values.ingestor.deployment.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.ingestor.serviceAccount.enabled }}
+      serviceAccountName: {{ include "otel-collector.ingestor.name" . }}
+      {{- end }}
+      volumes:
+        - name: otel-config
+          configMap:
+            name: {{ include "otel-collector.ingestor.name" . }}
+            optional: false
+            items:
+              - key: config.yaml
+                path: "config.yaml"
+      {{- with .Values.ingestor.deployment.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.ingestor.deployment.env }}
+          env:
+            {{- toYaml . | nindent 12}}
+          {{- end}}
+          {{- if .Values.ingestor.deployment.args }}
+          args:
+            {{- toYaml .Values.ingestor.deployment.args | nindent 12 }}
+          {{- end }}
+          {{- with .Values.ingestor.deployment.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}           
+          ports:
+          {{- range $name, $svcPort := .Values.ingestor.service.ports}}
+            - name: {{ $name }}
+              containerPort: {{ $svcPort }}
+              protocol: TCP
+          {{- end }}
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otelcol-contrib
+          {{- with .Values.ingestor.deployment.livenessProbe}}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end}}
+          {{- with .Values.ingestor.deployment.readinessProbe}}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end}}
+      {{- with .Values.ingestor.deployment.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ingestor.deployment.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ingestor.deployment.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

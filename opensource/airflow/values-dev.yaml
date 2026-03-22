@@ -1,8 +1,5 @@
-# Airflow Development Configuration
-# Using KubernetesExecutor
 executor: KubernetesExecutor
 
-# Webserver UI settings
 webserver:
   service:
     type: NodePort
@@ -17,24 +14,26 @@ webserver:
     limits:
       cpu: "500m"
       memory: "1Gi"
-        
-# Persistence for logs
+
+scheduler:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
 logs:
   persistence:
     enabled: true
-    size: 5Gi
+    size: 1Gi
     storageClassName: ebs-sc
 
-# Database configuration for external MySQL
-database:
-  type: mysql
-  host: <YOUR_MYSQL_HOST>
-  port: 3306
-  database: <YOUR_AIRFLOW_DATABASE_NAME>
-  user: <YOUR_AIRFLOW_USER>
-  # It is recommended to use a Kubernetes secret for the password.
-  # 1. Create a secret with your database password:
-  #    kubectl create secret generic airflow-db-secret --from-literal=password=<YOUR_DB_PASSWORD> -n airflow
-  # 2. Reference the secret name and key below:
-  passwordSecretName: airflow-db-secret
-  passwordSecretKey: password
+postgresql:
+  enabled: true
+  auth:
+    username: airflow
+    password: airflow
+    database: airflow

@@ -47,6 +47,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("anomaly-detection")
+# Persistent global DuckDB connection
+db_con = duckdb.connect(database=':memory:') 
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 
@@ -85,28 +87,30 @@ def load_model():
     log.info("Model loaded successfully on device=%s", device)
     return model, encoders, scalers, device
 
-# ── DuckDB → S3 writer ───────────────────────────────────────────────────────
+# ── DuckDB ───────────────────────────────────────────────────────
+def init_duckdb_s3():
+    """Initialize S3 credentials and extensions once."""
+    log.info("Initializing DuckDB S3 Connection...")
+    db_con.execute("INSTALL httpfs; LOAD httpfs;")
+    db_con.execute(f"""
+        CREATE OR REPLACE SECRET (
+            TYPE S3,
+            KEY_ID '{AWS_ACCESS_KEY_ID}',
+            SECRET '{AWS_SECRET_ACCESS_KEY}',
+            REGION '{S3_REGION}',
+            URL_STYLE 'path'
+        );
+    """)
 
 def write_to_s3(result_df: pd.DataFrame):
     """Write the result DataFrame to S3 as Parquet via DuckDB."""
     if result_df.empty:
         return
 
-    con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    con.execute(f"""
-        SET s3_endpoint='{S3_ENDPOINT}';
-        SET s3_region='{S3_REGION}';
-        SET s3_access_key_id='{AWS_ACCESS_KEY_ID}';
-        SET s3_secret_access_key='{AWS_SECRET_ACCESS_KEY}';
-        SET s3_use_ssl={'true' if S3_USE_SSL else 'false'};
-        SET s3_url_style='path';
-    """)
-
     # Register the DataFrame so DuckDB can reference it
-    con.register("result_df", result_df)
+    db_con.register("result_df", result_df)
 
-    con.execute(f"""
+    db_con.execute(f"""
         COPY (
             SELECT
                 make_timestamp(startTime::BIGINT // 1000) AS timestamp,
@@ -128,7 +132,6 @@ def write_to_s3(result_df: pd.DataFrame):
         (FORMAT PARQUET, PARTITION_BY (date_part), OVERWRITE_OR_IGNORE 1);
     """)
 
-    con.close()
     log.info("Wrote %d records to s3://%s/anomalies/", len(result_df), S3_BUCKET)
 
 # ── Batch processing pipeline ────────────────────────────────────────────────
@@ -210,7 +213,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
             recon = model(s, ps, op, pop, h, x)
 
             # (B, T, F) → per-timestep score (B, T)
-            timestep_loss = criterion(recon, x).sum(dim=2).cpu().numpy()
+            timestep_loss = criterion(recon, x).mean(dim=1).cpu().numpy()
             row_ids_np = row_ids.numpy()
 
             for b in range(len(row_ids_np)):
@@ -220,7 +223,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
                     if row == -1 or metric == 0:
                         continue
 
-                    score = float(timestep_loss[b, t_idx])
+                    score = float(timestep_loss[b])
 
                     # Boost score for server errors / OTel error status
                     if df.at[row, "span_status"] == 2 or df.at[row, "http_status"] == 5:
@@ -305,6 +308,7 @@ def main():
         log.error("Kafka exception: %s", e)
     finally:
         consumer.close()
+        db_con.close()
         log.info("Shutdown complete. total_processed=%d", total_processed)
 
 

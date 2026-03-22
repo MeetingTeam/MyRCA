@@ -16,65 +16,8 @@ ingestor:
     processors:
       batch:
         timeout: 3s
-        send_batch_size: 1
+        send_batch_size: 8
 
-  deployment:
-    podAnnotations: {}
-    podLabels: {}
-
-    podSecurityContext: {}
-    securityContext:
-      runAsUser: 1000
-      runAsGroup: 1000
-      fsGroup: 1000 
-    
-    replicaCount: 1
-
-    env: []
-
-    resources: {}
-
-    livenessProbe:
-      httpGet:
-        path: /
-        port: 13133
-      initialDelaySeconds: 5
-      periodSeconds: 10
-    readinessProbe:
-      httpGet:
-        path: /
-        port: 13133
-      initialDelaySeconds: 5
-      periodSeconds: 10
-
-    nodeSelector: {}
-
-    tolerations: []
-
-    affinity: {}
-
-  service:
-    type: ClusterIP
-    ports:
-      grpc: 4317
-      http: 4318
-
-  ingress:
-    enabled: false
-
-aggregator:
-  serviceAccount: 
-    enabled: false
-  
-  otel_config: 
-    processors:
-      batch:
-        timeout: 3s
-        send_batch_size: 1
-      groupbytrace:
-        wait_duration: 10s
-        num_traces: 1000
-    
     exporters:
       otlp:
         endpoint: "tempo.tempo.svc.cluster.local:4317"
@@ -85,7 +28,7 @@ aggregator:
           - redpanda.redpanda.svc.cluster.local:9093
         topic: "traces"
         encoding: "otlp_json"
-  
+
   deployment:
     podAnnotations: {}
     podLabels: {}

@@ -17,7 +17,7 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 KB_BUILDER_IMAGE = os.getenv("KB_BUILDER_IMAGE", "hungtran679/kb-builder")
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
-MODEL_NAME = "rca-knowledge-base"
+MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 
 RCA_SERVICE_DEPLOYMENT = os.getenv("RCA_SERVICE_DEPLOYMENT", "trace-rca-service")
 RCA_SERVICE_NAMESPACE = os.getenv("RCA_SERVICE_NAMESPACE", "rca")
@@ -28,21 +28,21 @@ def promote_model_to_production(**context):
     """
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     client = mlflow.MlflowClient()
-    
+
     # In a real scenario, your K8s pod would write its version to XCom.
     # For now, we fetch the latest version of the model to promote it.
-    versions = client.get_latest_versions(MODEL_NAME, stages=["None"])
+    versions = client.get_latest_versions(MLFLOW_KB_MODEL, stages=["None"])
     if not versions:
-        raise Exception(f"No versions found for model {MODEL_NAME}")
+        raise Exception(f"No versions found for model {MLFLOW_KB_MODEL}")
     
     latest_version = versions[0].version
     
     client.set_registered_model_alias(
-        name=MODEL_NAME,
+        name=MLFLOW_KB_MODEL,
         alias="production",
         version=latest_version
     )
-    print(f"Promoted version {latest_version} of {MODEL_NAME} to @production")
+    print(f"Promoted version {latest_version} of {MLFLOW_KB_MODEL} to @production")
 
 # --- DAG Definition ---
 with DAG(
