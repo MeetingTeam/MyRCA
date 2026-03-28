@@ -1,7 +1,25 @@
-# Grafana Development Configuration
-# Single instance with Tempo datasource
+
 
 replicas: 1
+
+
+image:
+  repository: grafana/grafana
+  tag: "12.0.2-ubuntu"
+  pullPolicy: IfNotPresent
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENVIRONMENT VARIABLES
+# Allow loading unsigned DuckDB plugin
+# ══════════════════════════════════════════════════════════════════════════════
+env:
+  GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: "motherduck-duckdb-datasource"
+
+# Load AWS credentials from Kubernetes Secret
+# Secret must contain: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+envFromSecrets:
+  - name: grafana-aws-credentials
+    optional: false
 
 # Persistence for dashboards
 persistence:
@@ -22,11 +40,16 @@ resources:
 adminUser: admin
 adminPassword: admin
 
-# Tempo datasource configuration
+# ══════════════════════════════════════════════════════════════════════════════
+# DATASOURCES CONFIGURATION
+# - Tempo: Distributed tracing (default)
+# - DuckDB: Query anomaly detection results from S3 Parquet
+# ══════════════════════════════════════════════════════════════════════════════
 datasources:
   datasources.yaml:
     apiVersion: 1
     datasources:
+      # Tempo datasource for distributed tracing
       - name: Tempo
         type: tempo
         access: proxy
@@ -36,11 +59,39 @@ datasources:
         jsonData:
           httpMethod: GET
 
+      # DuckDB datasource for S3 anomaly data
+      # Plugin: https://github.com/motherduckdb/grafana-duckdb-datasource
+      - name: DuckDB-Anomaly
+        type: motherduck-duckdb-datasource
+        access: proxy
+        isDefault: false
+        editable: true
+        jsonData:
+          # Empty path = in-memory DuckDB (data resides in S3)
+          path: ""
+          # initSQL loads httpfs extension and configures S3 credentials
+          # Credentials are injected from grafana-aws-credentials secret via envFromSecrets
+          # Grafana provisioning substitutes ${ENV_VAR} before passing to plugin
+          initSQL: |
+            INSTALL httpfs;
+            LOAD httpfs;
+            SET s3_endpoint='s3.amazonaws.com';
+            SET s3_region='ap-southeast-7';
+            SET s3_access_key_id='';
+            SET s3_secret_access_key='';
+            SET s3_use_ssl=true;
+            SET s3_url_style='path';
+
 # Service configuration
 service:
   type: NodePort
   nodePort: 30300  # Access via node IP:30300
 
-# Enable useful plugins
+# ══════════════════════════════════════════════════════════════════════════════
+# PLUGINS
+# - grafana-clock-panel: Utility
+# - motherduck-duckdb-datasource: DuckDB/S3 data source (unsigned, requires env var)
+# ══════════════════════════════════════════════════════════════════════════════
 plugins:
   - grafana-clock-panel
+  - https://github.com/motherduckdb/grafana-duckdb-datasource/releases/download/v0.4.0/motherduck-duckdb-datasource-0.4.0.zip;motherduck-duckdb-datasource
