@@ -9,7 +9,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 ingestor:
-  serviceAccount: 
+  serviceAccount:
     enabled: false
 
   otel_config:
@@ -38,8 +38,8 @@ ingestor:
     securityContext:
       runAsUser: 1000
       runAsGroup: 1000
-      fsGroup: 1000 
-    
+      fsGroup: 1000
+
     replicaCount: 1
 
     env: []
