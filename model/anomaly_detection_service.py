@@ -29,15 +29,15 @@ from common.util import map_status_group
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "redpanda.redpanda.svc.cluster.local:9093")
-INPUT_TOPIC = os.getenv("INPUT_TOPIC", "preprocess-data")
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
+INPUT_TOPIC = os.getenv("INPUT_TOPIC", "traces")
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "anomaly-group")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
 ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_THRESHOLD", "0.3293778896331787"))
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset")
+S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
@@ -213,7 +213,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
             recon = model(s, ps, op, pop, h, x)
 
             # (B, T, F) → per-timestep score (B, T)
-            timestep_loss = criterion(recon, x).mean(dim=1).cpu().numpy()
+            timestep_loss = criterion(recon, x).sum(dim=2).cpu().numpy()
             row_ids_np = row_ids.numpy()
 
             for b in range(len(row_ids_np)):
@@ -223,7 +223,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
                     if row == -1 or metric == 0:
                         continue
 
-                    score = float(timestep_loss[b])
+                    score = float(timestep_loss[b, t_idx])
 
                     # Boost score for server errors / OTel error status
                     if df.at[row, "span_status"] == 2 or df.at[row, "http_status"] == 5:
@@ -272,6 +272,9 @@ def main():
     })
     consumer.subscribe([INPUT_TOPIC])
     log.info("Consuming from [%s], group=[%s], batch_size=%d", INPUT_TOPIC, CONSUMER_GROUP, BATCH_SIZE)
+
+    # Initialize DuckDB S3 connection
+    init_duckdb_s3()
 
     total_processed = 0
 
