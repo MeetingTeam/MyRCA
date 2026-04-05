@@ -1,16 +1,14 @@
 from algo import rank_root_causes
 from preproccessing import build_trace_dags_from_csv
+from log_extractor import LokiLogExtractor
+import llm_rca
 import os
 from confluent_kafka import Consumer, KafkaError, KafkaException
 import json
 import duckdb
 from datetime import datetime, timezone
-import boto3
-from urllib.parse import urlparse
 import requests
 import logging
-import mlflow
-import mlflow.pyfunc
 from mlflow import MlflowClient
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -29,6 +27,8 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
+LOKI_URL = os.getenv("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
+LLM_N_SAMPLES = int(os.getenv("LLM_N_SAMPLES", "3"))
 
 # Setup logging
 logging.basicConfig(
@@ -116,46 +116,62 @@ def query_spans_by_timestamp(start_dt, end_dt):
 
         result_df = db_con.cursor().execute(query, params).fetchdf()
 
-        print(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
+        log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
         return result_df
 
     except Exception as e:
-        print(f"Error querying spans: {e}")
+        log.error(f"Error querying spans: {e}")
         return None
 
-def send_rca_notification(ranking, start_dt: datetime, end_dt: datetime):
+def send_rca_notification(
+    ranking, start_dt: datetime, end_dt: datetime, llm_result: dict | None = None
+):
     """Post the RCA ranking results to a Discord channel via webhook."""
     if not DISCORD_WEBHOOK_URL:
-        print("Discord webhook URL not configured, skipping notification")
+        log.info("Discord webhook URL not configured, skipping notification")
         return
 
     rank_text = ""
-    for i, (svc, score) in enumerate(ranking[:3]): # Take up to 3
+    for i, (svc, score) in enumerate(ranking[:3]):
         medals = ["1️⃣", "2️⃣", "3️⃣"]
         rank_text += f"{medals[i]} `{svc}` (Score: {score:.4f})\n"
-    
-    # Discord Dynamic Markdown (Best for users in different timezones)
+
     start_ts = int(start_dt.replace(tzinfo=timezone.utc).timestamp())
     end_ts = int(end_dt.replace(tzinfo=timezone.utc).timestamp())
     discord_time = f"<t:{start_ts}:f> to <t:{end_ts}:t>"
 
-    message = f"""
-🚨 **System Failure Detected**
+    message = f"""🚨 **System Failure Detected**
 **Time Window:** {discord_time}
 
-**Top 3 Root Cause Microservices:**
-{rank_text}
+**Stage 1 — Structural Ranking:**
+{rank_text}"""
 
-    """
-    
+    # Append Stage 2 LLM results if available
+    if llm_result and llm_result.get("root_cause"):
+        rc = llm_result["root_cause"]
+        confidence_level = llm_result.get("confidence_level", "N/A")
+        agreement = llm_result.get("agreement_ratio", 0)
+        chain = " → ".join(llm_result.get("propagation_chain", [])) or "N/A"
+
+        message += f"""
+**Stage 2 — LLM Analysis:**
+🎯 Root Cause: `{rc['service']}` (confidence: {rc['confidence']:.2f}, level: {confidence_level})
+🤝 Agreement: {agreement:.0%} ({LLM_N_SAMPLES} samples)
+🔗 Propagation: {chain}
+"""
+        # Add per-service analysis
+        for a in llm_result.get("analysis", [])[:3]:
+            icon = "🔴" if a.get("classification") == "INTRINSIC" else "🟡"
+            message += f"{icon} `{a['service']}` [{a['classification']}]: {a.get('evidence', '')[:100]}\n"
+
     payload = {"content": message}
-    
+
     try:
         resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
         resp.raise_for_status()
-        print("Sent RCA notification to Discord")
+        log.info("Sent RCA notification to Discord")
     except Exception as e:
-        print(f"Failed to send Discord notification: {e}")
+        log.error(f"Failed to send Discord notification: {e}")
 
 def main():
     log.info("Starting RCA Service...")
@@ -173,6 +189,8 @@ def main():
     kb = fetch_kb_from_mlflow(MLFLOW_KB_MODEL)
     # Initialize DuckDB S3 connection
     init_duckdb_s3()
+    # Initialize Loki log extractor (Stage 2)
+    log_extractor = LokiLogExtractor(LOKI_URL)
     
     try: 
         while True:
@@ -195,18 +213,35 @@ def main():
                 spans_df = query_spans_by_timestamp(start_dt, end_dt)
 
                 if spans_df is None or spans_df.empty:
-                    print("No spans found for the given time range")
+                    log.warning("No spans found for the given time range")
                     continue
                 
-                traces = build_trace_dags_from_csv(spans_df)  # This will prepare the data structure for RCA
+                traces = build_trace_dags_from_csv(spans_df)
                 ranking = rank_root_causes(traces, kb)
-                print(f"RCA ranking: {ranking}")
+                log.info(f"Stage 1 ranking: {ranking}")
 
-                send_rca_notification(ranking, start_dt, end_dt)
+                # ── Stage 2: Log Evidence + LLM Analysis ──────────────
+                llm_result = None
+                try:
+                    top_k_services = [svc for svc, _ in ranking[:5]]
+                    logs = log_extractor.query_logs_for_services(
+                        top_k_services, start_dt, end_dt
+                    )
+                    llm_result = llm_rca.analyze_with_consistency(
+                        ranking, traces, logs, n_samples=LLM_N_SAMPLES
+                    )
+                    log.info(
+                        f"Stage 2 result: root_cause={llm_result['root_cause']}, "
+                        f"confidence_level={llm_result['confidence_level']}"
+                    )
+                except Exception as e:
+                    log.error(f"Stage 2 failed, falling back to Stage 1: {e}", exc_info=True)
+
+                send_rca_notification(ranking, start_dt, end_dt, llm_result)
 
             except Exception as e:
                 log.error(f"Error processing RCA task: {e}", exc_info=True)
-    except Exception:
+    except (KeyboardInterrupt, SystemExit):
         log.info("Shutting down RCA Service...")
     finally:
         consumer.close()

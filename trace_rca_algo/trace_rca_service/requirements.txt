@@ -3,3 +3,5 @@ duckdb
 boto3
 requests
 pandas
+anthropic
+mlflow
