@@ -29,6 +29,10 @@ ingestor:
         traces:
           encoding: "otlp_json"
           topic: "traces"
+      otlphttp/loki:
+        endpoint: "http://loki.loki.svc.cluster.local:3100/otlp"
+        tls:
+          insecure: true
 
   deployment:
     podAnnotations: {}

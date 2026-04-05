@@ -21,6 +21,10 @@ envFromSecrets:
   - name: grafana-aws-credentials
     optional: false
 
+# Kill old pod before starting new one (required for RWO EBS PVC)
+deploymentStrategy:
+  type: Recreate
+
 # Persistence for dashboards
 persistence:
   enabled: true
@@ -43,6 +47,7 @@ adminPassword: admin
 # ══════════════════════════════════════════════════════════════════════════════
 # DATASOURCES CONFIGURATION
 # - Tempo: Distributed tracing (default)
+# - Loki: Log aggregation (trace-log correlation via OTel trace_id)
 # - DuckDB: Query anomaly detection results from S3 Parquet
 # ══════════════════════════════════════════════════════════════════════════════
 datasources:
@@ -52,12 +57,32 @@ datasources:
       # Tempo datasource for distributed tracing
       - name: Tempo
         type: tempo
+        uid: tempo
         access: proxy
         url: http://tempo.tempo.svc.cluster.local:3200
         isDefault: true
         editable: true
         jsonData:
           httpMethod: GET
+          tracesToLogsV2:
+            datasourceUid: loki
+            filterByTraceID: true
+            filterBySpanID: false
+
+      # Loki datasource for log aggregation
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki.loki.svc.cluster.local:3100
+        isDefault: false
+        editable: true
+        jsonData:
+          derivedFields:
+            - datasourceUid: tempo
+              matcherRegex: "trace_id=(\\w+)"
+              name: TraceID
+              url: "$${__value.raw}"
 
       # DuckDB datasource for S3 anomaly data
       # Plugin: https://github.com/motherduckdb/grafana-duckdb-datasource
@@ -81,6 +106,25 @@ datasources:
             SET s3_secret_access_key='';
             SET s3_use_ssl=true;
             SET s3_url_style='path';
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD PROVISIONING
+# ══════════════════════════════════════════════════════════════════════════════
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: "myrca"
+        orgId: 1
+        folder: "MyRCA"
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/myrca
+
+dashboardsConfigMaps:
+  myrca: "grafana-dashboards-myrca"
 
 # Service configuration
 service:

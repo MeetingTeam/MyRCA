@@ -30,4 +30,8 @@ data:
         traces:
           receivers: [otlp]
           processors: [{{ keys .Values.ingestor.otel_config.processors | join ", " }}]
-          exporters: [{{ keys .Values.ingestor.otel_config.exporters | join ", " }}]
+          exporters: [otlp, kafka]
+        logs:
+          receivers: [otlp]
+          processors: [{{ keys .Values.ingestor.otel_config.processors | join ", " }}]
+          exporters: [otlphttp/loki]
