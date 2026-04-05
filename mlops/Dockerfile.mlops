@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies first (cache layer)
+COPY mlops/requirements-mlops.txt .
+RUN pip install --no-cache-dir -r requirements-mlops.txt
+
+# Copy shared modules from model/
+COPY model/common/ common/
+COPY model/configs/ configs/
+COPY model/transformer_ae/ transformer_ae/
+
+# Copy pipeline task code
+COPY mlops/tasks/ tasks/
+
+# Default entrypoint — overridden per task by KubernetesPodOperator
+CMD ["python", "-c", "print('MLOps pipeline image ready')"]

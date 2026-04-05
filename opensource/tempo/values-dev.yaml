@@ -34,7 +34,7 @@ tempo:
       backend: s3
       blocklist_poll: 30s  # Poll S3 for new blocks every 30s (default: 5m)
       s3:
-        bucket: pqhung-tempo-traces-2  # Tempo owns this bucket structure
+        bucket: pqhung-tempo-traces  # Tempo owns this bucket structure
         endpoint: s3.amazonaws.com
         region: ap-southeast-1
         # Credentials from Kubernetes Secret (see Phase 4.2.1 in task.plan)

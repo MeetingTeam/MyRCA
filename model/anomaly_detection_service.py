@@ -14,6 +14,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import boto3
 import duckdb
 import joblib
 import numpy as np
@@ -34,6 +35,10 @@ INPUT_TOPIC = os.getenv("INPUT_TOPIC", "traces")
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "anomaly-group")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
 ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_THRESHOLD", "0.3293778896331787"))
+
+# Write buffer settings: flush when row count OR time threshold is reached
+FLUSH_ROW_THRESHOLD = int(os.getenv("FLUSH_ROW_THRESHOLD", "500"))
+FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "60"))
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
@@ -64,13 +69,44 @@ signal.signal(signal.SIGTERM, _stop)
 
 # ── Model loading (one-time) ─────────────────────────────────────────────────
 
-def load_model():
-    """Load the Transformer Autoencoder model, encoders, and scalers."""
-    BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transformer_ae")
+def _download_s3_model(model_s3_path: str, local_dir: str):
+    """Download model artifacts from S3 to a local directory."""
+    s3_client = boto3.client("s3", region_name=S3_REGION)
+    # Parse bucket and prefix from s3://bucket/prefix/
+    parts = model_s3_path.replace("s3://", "").split("/", 1)
+    bucket = parts[0]
+    prefix = parts[1].rstrip("/")
 
-    model_path = os.path.join(BASE_DIR, "transformer_ae_model.pth")
-    encoders = joblib.load(os.path.join(BASE_DIR, "transformer_ae_encoders.pkl"))
-    scalers = joblib.load(os.path.join(BASE_DIR, "transformer_ae_scalers.pkl"))
+    os.makedirs(local_dir, exist_ok=True)
+    for filename in ["model.pth", "encoders.pkl", "scalers.pkl"]:
+        key = f"{prefix}/{filename}"
+        local_path = os.path.join(local_dir, filename)
+        log.info("Downloading s3://%s/%s → %s", bucket, key, local_path)
+        s3_client.download_file(bucket, key, local_path)
+
+
+def load_model():
+    """Load the Transformer Autoencoder model, encoders, and scalers.
+
+    If MODEL_S3_PATH is set, downloads artifacts from S3.
+    Otherwise, falls back to local filesystem loading (backward compatible).
+    """
+    model_s3_path = os.getenv("MODEL_S3_PATH", "")
+    model_version = os.getenv("MODEL_VERSION", "")
+
+    if model_s3_path:
+        log.info("Loading model from S3: %s (version=%s)", model_s3_path, model_version)
+        local_dir = "/tmp/model"
+        _download_s3_model(model_s3_path, local_dir)
+        model_path = os.path.join(local_dir, "model.pth")
+        encoders = joblib.load(os.path.join(local_dir, "encoders.pkl"))
+        scalers = joblib.load(os.path.join(local_dir, "scalers.pkl"))
+    else:
+        log.info("Loading model from local filesystem (no MODEL_S3_PATH set)")
+        BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transformer_ae")
+        model_path = os.path.join(BASE_DIR, "transformer_ae_model.pth")
+        encoders = joblib.load(os.path.join(BASE_DIR, "transformer_ae_encoders.pkl"))
+        scalers = joblib.load(os.path.join(BASE_DIR, "transformer_ae_scalers.pkl"))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -84,7 +120,8 @@ def load_model():
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    log.info("Model loaded successfully on device=%s", device)
+    source = f"S3 ({model_version})" if model_s3_path else "local"
+    log.info("Model loaded from %s on device=%s", source, device)
     return model, encoders, scalers, device
 
 # ── DuckDB ───────────────────────────────────────────────────────
@@ -244,18 +281,24 @@ def process_batch(messages: list, model, encoders, scalers, device):
         log.info("No scored spans in this batch")
         return 0
 
-    # 6. Write to S3
-    write_to_s3(result_df)
-
     anomaly_count = result_df["is_anomaly"].sum()
     log.info(
         "Batch processed: %d records → %d scored → %d anomalies",
         len(records), len(result_df), anomaly_count,
     )
-    return len(result_df)
+    return result_df
 
 
 # ── Main consumer loop ───────────────────────────────────────────────────────
+
+def flush_buffer(buffer: list[pd.DataFrame]) -> int:
+    """Concatenate buffered DataFrames and write to S3. Returns row count written."""
+    if not buffer:
+        return 0
+    combined = pd.concat(buffer, ignore_index=True)
+    write_to_s3(combined)
+    return len(combined)
+
 
 def main():
     log.info("Anomaly Detection Service starting…")
@@ -271,45 +314,73 @@ def main():
         "enable.auto.commit": True,
     })
     consumer.subscribe([INPUT_TOPIC])
-    log.info("Consuming from [%s], group=[%s], batch_size=%d", INPUT_TOPIC, CONSUMER_GROUP, BATCH_SIZE)
+    log.info(
+        "Consuming from [%s], group=[%s], batch_size=%d, flush_rows=%d, flush_interval=%ds",
+        INPUT_TOPIC, CONSUMER_GROUP, BATCH_SIZE, FLUSH_ROW_THRESHOLD, FLUSH_INTERVAL_SECONDS,
+    )
 
     # Initialize DuckDB S3 connection
     init_duckdb_s3()
 
     total_processed = 0
+    write_buffer: list[pd.DataFrame] = []
+    buffer_rows = 0
+    last_flush_time = time.time()
 
     try:
         while running:
             # Batch consume
             messages = consumer.consume(num_messages=BATCH_SIZE, timeout=5.0)
 
-            if not messages:
-                continue
-
-            # Filter out errors
-            valid_msgs = []
-            for msg in messages:
-                if msg.error():
-                    if msg.error().code() == KafkaError._PARTITION_EOF:
+            if messages:
+                # Filter out errors
+                valid_msgs = []
+                for msg in messages:
+                    if msg.error():
+                        if msg.error().code() == KafkaError._PARTITION_EOF:
+                            continue
+                        log.error("Consumer error: %s", msg.error())
                         continue
-                    log.error("Consumer error: %s", msg.error())
-                    continue
-                valid_msgs.append(msg)
+                    valid_msgs.append(msg)
 
-            if not valid_msgs:
-                continue
+                if valid_msgs:
+                    log.info("Received %d messages, processing…", len(valid_msgs))
+                    try:
+                        result_df = process_batch(valid_msgs, model, encoders, scalers, device)
+                        if result_df is not None and not result_df.empty:
+                            write_buffer.append(result_df)
+                            buffer_rows += len(result_df)
+                    except Exception as e:
+                        log.error("Error processing batch: %s", e, exc_info=True)
 
-            log.info("Received %d messages, processing…", len(valid_msgs))
+            # Flush buffer if row threshold or time interval is reached
+            should_flush = (
+                buffer_rows >= FLUSH_ROW_THRESHOLD
+                or (write_buffer and time.time() - last_flush_time >= FLUSH_INTERVAL_SECONDS)
+            )
 
-            try:
-                scored = process_batch(valid_msgs, model, encoders, scalers, device)
-                total_processed += scored
-            except Exception as e:
-                log.error("Error processing batch: %s", e, exc_info=True)
+            if should_flush:
+                try:
+                    flushed = flush_buffer(write_buffer)
+                    total_processed += flushed
+                    log.info("Flushed %d buffered records to S3", flushed)
+                except Exception as e:
+                    log.error("Error flushing buffer to S3: %s", e, exc_info=True)
+                write_buffer.clear()
+                buffer_rows = 0
+                last_flush_time = time.time()
 
     except KafkaException as e:
         log.error("Kafka exception: %s", e)
     finally:
+        # Flush remaining buffer on shutdown
+        if write_buffer:
+            try:
+                flushed = flush_buffer(write_buffer)
+                total_processed += flushed
+                log.info("Final flush: %d records to S3", flushed)
+            except Exception as e:
+                log.error("Error in final flush: %s", e, exc_info=True)
         consumer.close()
         db_con.close()
         log.info("Shutdown complete. total_processed=%d", total_processed)
