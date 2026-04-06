@@ -3,3 +3,4 @@ duckdb
 boto3
 requests
 pandas
+mlflow-skinny

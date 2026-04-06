@@ -1,5 +1,3 @@
 duckdb
 mlflow
-mlflow_skinny
-mlflow_tracing
 pandas

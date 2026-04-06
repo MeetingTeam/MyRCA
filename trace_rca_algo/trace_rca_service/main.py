@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 import requests
 import logging
 import mlflow
-import mlflow.pyfunc
 from mlflow import MlflowClient
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -28,6 +27,8 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
 MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 
 # Setup logging
@@ -60,6 +61,7 @@ def fetch_kb_from_mlflow(model_name):
     Fetches the Knowledge Base from MLflow using the production alias.
     Returns the KB dictionary loaded from the model's artifacts.
     """
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     client = MlflowClient()
     
     try:
@@ -73,8 +75,7 @@ def fetch_kb_from_mlflow(model_name):
         
         # Download the KB artifact from the run
         # The artifact is stored at kb_model/artifacts/kb_json
-        artifact_path = client.download_artifacts(run_id, "kb_model")
-        kb_file = os.path.join(artifact_path, "artifacts", "kb_json")
+        kb_file = client.download_artifacts(run_id, "kb_model/artifacts/built_kb.json", dst_path="./mlflow_artifacts")
         
         # Load the KB JSON
         with open(kb_file, "r") as f:

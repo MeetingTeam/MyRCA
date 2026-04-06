@@ -10,13 +10,13 @@ from mlflow import MlflowClient
 from kb_building import train_knowledge_base
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
-S3_REGION = os.getenv("S3_REGION", "ap-southeast-7")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset")
+S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
+S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
-TIME_WINDOW_DAYS = int(os.getenv("TIME_WINDOW_DAYS", "7"))
+TIME_WINDOW_DAYS = int(os.getenv("TIME_WINDOW_DAYS", "30"))
 DATASET_LIMIT = int(os.getenv("DATASET_LIMIT", "500000"))
 
 AIRFLOW_RUN_ID = os.getenv("AIRFLOW_RUN_ID", "manual_run")
@@ -39,6 +39,11 @@ db_con.execute(f"""
 # Initialize MLflow (ensure your SQLite/Docker server is running)
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 client = MlflowClient()
+
+def safe_decode(val):
+    if isinstance(val, bytes):
+        return val.decode('utf-16', errors='replace') # Replaces bad bytes with 
+    return val
 
 class KBModelWrapper(mlflow.pyfunc.PythonModel):
     """Wraps the KB JSON so MLflow can manage it as a Model."""
@@ -70,7 +75,7 @@ def register_to_mlflow(new_kb_dict):
 
     # 2. Upload and Register with MLflow
     # Save locally first for MLflow to pick up
-    temp_path = "temp_kb.json"
+    temp_path = "built_kb.json"
     with open(temp_path, "w") as f:
         json.dump(new_kb_dict, f)
 
@@ -79,17 +84,17 @@ def register_to_mlflow(new_kb_dict):
         mlflow.set_tag("airflow_run_id", AIRFLOW_RUN_ID)
         
         # Log as a Model to enable Aliases
-        mlflow.pyfunc.log_model(
+        model_info = mlflow.pyfunc.log_model(
             artifact_path="kb_model",
             python_model=KBModelWrapper(),
             artifacts={"kb_json": temp_path},
-            registered_model_name=MODEL_NAME
+            registered_model_name=MLFLOW_KB_MODEL
         )
         
         # 3. Promote to Production Alias
         # This automatically moves @production from the old version to this one
         # client.set_registered_model_alias(
-        #     name=MODEL_NAME,
+        #     name=MLFLOW_KB_MODEL,
         #     alias="production",
         #     version=model_info.registered_model_version
         # )
@@ -101,12 +106,17 @@ def main():
     start_date_str = start_dt.strftime("%Y-%m-%d")
     end_date_str = end_dt.strftime("%Y-%m-%d")
     
-    df = db_con.execute(f"""
-            SELECT * 
-            FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/*/*.parquet', hive_partitioning = 1)
-            WHERE date_part BETWEEN '{start_date_str}' AND '{end_date_str}'
-            LIMIT {DATASET_LIMIT}
-    """).fetchdf()
+    # This will print exactly what is breaking before it hits DuckDB
+    df = db_con.execute("""
+        SELECT * FROM read_parquet(?, hive_partitioning = 1)
+        WHERE date_part BETWEEN ? AND ?
+        LIMIT ?
+    """, [
+        f's3://{S3_BUCKET}/anomalies/data.parquet/*/*.parquet',
+        start_date_str,
+        end_date_str,
+        DATASET_LIMIT
+    ]).fetchdf()
 
     if df.empty:
         print(f"No dataset found within time range {start_date_str} to {end_date_str}. Please check your S3 path and data availability.")

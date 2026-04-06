@@ -7,16 +7,17 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 import mlflow
+from kubernetes import client, config
+from datetime import datetime
+from kubernetes.client import models as k8s
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-7")
 S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-KB_BUILDER_IMAGE = os.getenv("KB_BUILDER_IMAGE", "hungtran679/kb-builder")
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
+KB_BUILDER_IMAGE = os.getenv("KB_BUILDER_IMAGE", "hungtran679/kb_builder:latest")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
 MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 
 RCA_SERVICE_DEPLOYMENT = os.getenv("RCA_SERVICE_DEPLOYMENT", "trace-rca-service")
@@ -44,6 +45,42 @@ def promote_model_to_production(**context):
     )
     print(f"Promoted version {latest_version} of {MLFLOW_KB_MODEL} to @production")
 
+def restart_deployment(**context):
+    """
+    Equivalent to:
+    kubectl rollout restart deployment/<name> -n <namespace>
+    """
+
+    # Load config (choose one depending on environment)
+    try:
+        config.load_incluster_config()   # if running inside K8s
+    except:
+        raise Exception("Failed to load in-cluster config. Ensure this is running inside the cluster.")
+
+    apps_v1 = client.AppsV1Api()
+    now = datetime.utcnow().isoformat()
+
+    patch = {
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": now
+                    }
+                }
+            }
+        }
+    }
+
+    # Apply patch
+    response = apps_v1.patch_namespaced_deployment(
+        name=RCA_SERVICE_DEPLOYMENT,
+        namespace=RCA_SERVICE_NAMESPACE,
+        body=patch
+    )
+
+    return response
+
 # --- DAG Definition ---
 with DAG(
     'kb_building_dag',
@@ -54,6 +91,7 @@ with DAG(
 ) as dag:
 
     # Step 1: Run the Training/Building Pod
+    # AWS credentials from secret
     run_kb_k8s = KubernetesPodOperator(
         task_id='run_kb_building_pod',
         namespace='airflow',
@@ -63,16 +101,17 @@ with DAG(
             'MLFLOW_TRACKING_URI': MLFLOW_TRACKING_URI,
             'S3_REGION': S3_REGION,
             'S3_BUCKET': S3_BUCKET,
-            'AWS_ACCESS_KEY_ID': AWS_ACCESS_KEY_ID,
-            'AWS_SECRET_ACCESS_KEY': AWS_ACCESS_KEY_ID,
             'AIRFLOW_RUN_ID': '{{ run_id }}'
         },
+        env_from=[
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="airflow-aws-secret")),
+        ],
         container_resources=k8s.V1ResourceRequirements(
-            requests={"cpu": "100m", "memory": "128Mi"},
+            requests={"cpu": "200m", "memory": "256Mi"},
             limits={"cpu": "500m", "memory": "512Mi"}
         ),
         get_logs=True,
-        is_delete_operator_pod=True,
+        on_finish_action="keep_pod",
         in_cluster=True,
     )
 
@@ -88,9 +127,9 @@ with DAG(
     )
 
     # Step 4: Refresh K8s Deployment (Trigger new Pods to pull new KB)
-    refresh_deployment = BashOperator(
+    refresh_deployment = PythonOperator(
         task_id='refresh_serving_pods',
-        bash_command=f"kubectl rollout restart deployment/{RCA_SERVICE_DEPLOYMENT} -n {RCA_SERVICE_NAMESPACE}"
+        python_callable=restart_deployment
     )
 
     # Dependency Flow
