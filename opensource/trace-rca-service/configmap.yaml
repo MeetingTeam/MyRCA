@@ -12,8 +12,9 @@ data:
   S3_REGION: "us-east-1"
   S3_BUCKET: "kltn-anomaly-dateset-1"
   S3_USE_SSL: "true"
-  S3_KB_PATH: "s3://kltn-anomaly-dateset/knowledge_base.json"
+  S3_KB_PATH: "s3://kltn-anomaly-dateset-1/knowledge_base.json"
 
   LOKI_URL: "http://loki.loki.svc.cluster.local:3100"
   LLM_N_SAMPLES: "3"
   ANTHROPIC_MODEL: "claude-haiku-4-5-20251001"
+  ANTHROPIC_BASE_URL: "https://taphoaapi.info.vn/"

@@ -119,8 +119,8 @@ def analyze(
             messages=[{"role": "user", "content": user_prompt}],
         )
 
-        # Extract text content from response
-        text = response.content[0].text
+        # Extract text content from response (skip thinking blocks from proxy)
+        text = next(b.text for b in response.content if b.type == "text")
         # Parse JSON from response (handle markdown code blocks)
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
