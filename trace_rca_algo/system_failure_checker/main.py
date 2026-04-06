@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import time
 import requests
 import duckdb
 from datetime import datetime, timedelta, timezone
@@ -107,8 +108,21 @@ def check_system_failures(start_dt, end_dt):
             ORDER BY abnormal_ratio DESC
         """
         
-        # Use a cursor for thread-safety if multiple instances run
-        result = db_con.cursor().execute(query).fetchdf()
+        # Retry on transient read errors (race condition: anomaly-detection
+        # service may be overwriting the parquet file on S3 mid-read).
+        max_retries = 3
+        result = None
+        for attempt in range(max_retries):
+            try:
+                result = db_con.cursor().execute(query).fetchdf()
+                break
+            except (UnicodeDecodeError, duckdb.IOException) as read_err:
+                if attempt < max_retries - 1:
+                    log.warning("Transient S3 read error (attempt %d/%d): %s", attempt + 1, max_retries, read_err)
+                    time.sleep(2)
+                else:
+                    log.warning("S3 read failed after %d attempts, skipping this window", max_retries)
+                    return
 
         if result.empty:
             log.info("No anomalies found in window %s to %s", start_ts_str, end_ts_str)

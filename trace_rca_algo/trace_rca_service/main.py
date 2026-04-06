@@ -3,6 +3,7 @@ from preproccessing import build_trace_dags_from_csv
 from log_extractor import LokiLogExtractor
 import llm_rca
 import os
+import time
 from confluent_kafka import Consumer, KafkaError, KafkaException
 import json
 import duckdb
@@ -55,36 +56,43 @@ def init_duckdb_s3():
         );
     """)
 
+def fetch_kb_from_s3(s3_path):
+    """Fetch Knowledge Base JSON directly from S3 via DuckDB."""
+    log.info(f"Loading KB from S3: {s3_path}")
+    result = db_con.execute(f"SELECT * FROM read_json_auto('{s3_path}')").fetchdf()
+    kb = json.loads(result.to_json(orient="records"))[0]
+    log.info(f"Successfully loaded KB from S3 ({len(kb)} entries)")
+    return kb
+
 def fetch_kb_from_mlflow(model_name):
     """
     Fetches the Knowledge Base from MLflow using the production alias.
-    Returns the KB dictionary loaded from the model's artifacts.
+    Falls back to S3_KB_PATH if MLflow is unavailable.
     """
     client = MlflowClient()
-    
+
     try:
-        # Get the model version with the production alias
         model_version = client.get_model_version_by_alias(
             name=model_name,
             alias="production"
         )
         run_id = model_version.run_id
         log.info(f"Found production KB model version {model_version.version} from run {run_id}")
-        
-        # Download the KB artifact from the run
-        # The artifact is stored at kb_model/artifacts/kb_json
+
         artifact_path = client.download_artifacts(run_id, "kb_model")
         kb_file = os.path.join(artifact_path, "artifacts", "kb_json")
-        
-        # Load the KB JSON
+
         with open(kb_file, "r") as f:
             kb = json.load(f)
-        
+
         log.info(f"Successfully loaded KB from MLflow (version {model_version.version})")
         return kb
-        
+
     except Exception as e:
-        log.error(f"Failed to fetch KB from MLflow: {e}", exc_info=True)
+        log.warning(f"MLflow KB fetch failed: {e}")
+        if S3_KB_PATH:
+            log.info("Falling back to S3 KB path...")
+            return fetch_kb_from_s3(S3_KB_PATH)
         raise
 
 def query_spans_by_timestamp(start_dt, end_dt):
@@ -114,10 +122,21 @@ def query_spans_by_timestamp(start_dt, end_dt):
             start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
         ]
 
-        result_df = db_con.cursor().execute(query, params).fetchdf()
-
-        log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
-        return result_df
+        # Retry on transient read errors (race condition: anomaly-detection
+        # service may be overwriting the parquet file on S3 mid-read).
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result_df = db_con.cursor().execute(query, params).fetchdf()
+                log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
+                return result_df
+            except (UnicodeDecodeError, duckdb.IOException) as read_err:
+                if attempt < max_retries - 1:
+                    log.warning("Transient S3 read error (attempt %d/%d): %s", attempt + 1, max_retries, read_err)
+                    time.sleep(2)
+                else:
+                    log.warning("S3 read failed after %d attempts, skipping", max_retries)
+                    return None
 
     except Exception as e:
         log.error(f"Error querying spans: {e}")
@@ -185,10 +204,10 @@ def main():
     })
     consumer.subscribe([INPUT_TOPIC])
 
-    # Load Knowledge Base from MLflow (production alias)
-    kb = fetch_kb_from_mlflow(MLFLOW_KB_MODEL)
-    # Initialize DuckDB S3 connection
+    # Initialize DuckDB S3 connection (must be before KB fetch for S3 fallback)
     init_duckdb_s3()
+    # Load Knowledge Base from MLflow (falls back to S3_KB_PATH)
+    kb = fetch_kb_from_mlflow(MLFLOW_KB_MODEL)
     # Initialize Loki log extractor (Stage 2)
     log_extractor = LokiLogExtractor(LOKI_URL)
     
