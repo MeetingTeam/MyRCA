@@ -1,0 +1,206 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Log Volume by Service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (service_name) (count_over_time({service_name=~\"$service\"} [$__interval]))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": { "mode": "normal" },
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Error Rate by Service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (service_name) (count_over_time({service_name=~\"$service\"} |~ \"(?i)(error|fatal|exception)\" [$__interval]))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 20 },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Warning Rate by Service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (service_name) (count_over_time({service_name=~\"$service\"} |~ \"(?i)warn\" [$__interval]))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 20 },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Failure Indicators (OOM, Timeout, Connection Refused)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "count_over_time({service_name=~\"$service\"} |~ \"(?i)(outofmemory|oom|timeout|timed out|connection refused)\" [$__range])",
+          "legendFormat": "Failure indicators",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "auto" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Error Count (Total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 16 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "count_over_time({service_name=~\"$service\"} |~ \"(?i)(error|fatal|exception)\" [$__range])",
+          "refId": "A"
+        }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Log Level Distribution",
+      "type": "piechart",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 16 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (detected_level) (count_over_time({service_name=~\"$service\"} [$__range]))",
+          "legendFormat": "{{detected_level}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Recent ERROR/WARN Logs",
+      "type": "logs",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service_name=~\"$service\"} |~ \"(?i)(error|warn|fatal|exception)\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "title": "All Logs (filtered)",
+      "type": "logs",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service_name=~\"$service\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["loki", "logs", "myrca"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".+",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values(service_name)",
+        "includeAll": true,
+        "multi": true,
+        "name": "service",
+        "query": "label_values(service_name)",
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Loki — Logs Overview",
+  "uid": "myrca-loki-logs",
+  "version": 1
+}

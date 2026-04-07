@@ -8,6 +8,8 @@ import mlflow
 import mlflow.pyfunc
 from mlflow import MlflowClient
 from kb_building import train_knowledge_base
+import boto3
+from urllib.parse import urlparse
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
@@ -21,7 +23,7 @@ DATASET_LIMIT = int(os.getenv("DATASET_LIMIT", "500000"))
 
 AIRFLOW_RUN_ID = os.getenv("AIRFLOW_RUN_ID", "manual_run")
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://34.226.226.116:30002")
 MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 
 # Initialize DuckDB connection
