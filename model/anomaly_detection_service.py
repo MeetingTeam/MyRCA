@@ -134,42 +134,55 @@ def init_duckdb_s3():
             TYPE S3,
             KEY_ID '{AWS_ACCESS_KEY_ID}',
             SECRET '{AWS_SECRET_ACCESS_KEY}',
-            REGION '{S3_REGION}',
-            URL_STYLE 'path'
+            REGION '{S3_REGION}'
         );
     """)
 
 def write_to_s3(result_df: pd.DataFrame):
-    """Write the result DataFrame to S3 as Parquet via DuckDB."""
+    """Write the result DataFrame to S3 as a uniquely-named Parquet file per flush.
+
+    Uses a fresh DuckDB connection + APPEND mode for each write to avoid
+    stale connection state issues with S3 endpoint resolution.
+    """
     if result_df.empty:
         return
 
-    # Register the DataFrame so DuckDB can reference it
-    db_con.register("result_df", result_df)
-
-    db_con.execute(f"""
-        COPY (
-            SELECT
-                make_timestamp(startTime::BIGINT // 1000) AS timestamp,
-                traceId AS trace_id,
-                spanId AS span_id,
-                parentSpanId AS parent_span_id,
-                raw_service AS service,
-                raw_operation AS operation,
-                http_status,
-                duration_raw AS duration_ns,
-                kind,
-                span_status,
-                anomaly_score,
-                is_anomaly,
-                current_date AS date_part
-            FROM result_df
-        )
-        TO 's3://{S3_BUCKET}/anomalies/data.parquet'
-        (FORMAT PARQUET, PARTITION_BY (date_part), OVERWRITE_OR_IGNORE 1);
-    """)
-
-    log.info("Wrote %d records to s3://%s/anomalies/", len(result_df), S3_BUCKET)
+    write_con = duckdb.connect(database=":memory:")
+    try:
+        write_con.execute("INSTALL httpfs; LOAD httpfs;")
+        write_con.execute(f"""
+            CREATE OR REPLACE SECRET (
+                TYPE S3,
+                KEY_ID '{AWS_ACCESS_KEY_ID}',
+                SECRET '{AWS_SECRET_ACCESS_KEY}',
+                REGION '{S3_REGION}'
+            );
+        """)
+        write_con.register("result_df", result_df)
+        write_con.execute(f"""
+            COPY (
+                SELECT
+                    make_timestamp(startTime::BIGINT // 1000) AS timestamp,
+                    traceId AS trace_id,
+                    spanId AS span_id,
+                    parentSpanId AS parent_span_id,
+                    raw_service AS service,
+                    raw_operation AS operation,
+                    http_status,
+                    duration_raw AS duration_ns,
+                    kind,
+                    span_status,
+                    anomaly_score,
+                    is_anomaly,
+                    current_date AS date_part
+                FROM result_df
+            )
+            TO 's3://{S3_BUCKET}/anomalies/data.parquet'
+            (FORMAT PARQUET, PARTITION_BY (date_part), APPEND);
+        """)
+        log.info("Wrote %d records to s3://%s/anomalies/", len(result_df), S3_BUCKET)
+    finally:
+        write_con.close()
 
 # ── Batch processing pipeline ────────────────────────────────────────────────
 
@@ -249,8 +262,8 @@ def process_batch(messages: list, model, encoders, scalers, device):
 
             recon = model(s, ps, op, pop, h, x)
 
-            # (B, T, F) → per-timestep score (B, T)
-            timestep_loss = criterion(recon, x).mean(dim=1).cpu().numpy()
+            # (B, T, F) → per-batch score (B,)
+            timestep_loss = criterion(recon, x).mean(dim=(1, 2)).cpu().numpy()
             row_ids_np = row_ids.numpy()
 
             for b in range(len(row_ids_np)):
