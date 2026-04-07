@@ -165,6 +165,11 @@ def analyze_with_consistency(
         result = analyze(ranking, traces, logs)
         results.append(result)
 
+    # Filter out None results from failed LLM calls
+    results = [r for r in results if r is not None]
+    if not results:
+        return _fallback_result(ranking)
+
     # Majority voting on root_cause service
     root_causes = [
         r.get("root_cause", {}).get("service", "unknown")

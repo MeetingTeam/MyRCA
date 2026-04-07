@@ -5,3 +5,5 @@ requests
 pandas
 anthropic
 mlflow
+fastapi
+uvicorn
