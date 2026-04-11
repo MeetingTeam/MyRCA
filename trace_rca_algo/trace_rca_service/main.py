@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 import requests
 import logging
 from mlflow import MlflowClient
+import mlflow
+import boto3
+from urllib.parse import urlparse
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -23,14 +26,16 @@ INPUT_TOPIC = os.getenv("INPUT_TOPIC", "rca-task-data")
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "rca-service-group")
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
-S3_REGION = os.getenv("S3_REGION", "ap-southeast-7")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset")
+S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
+S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
-S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset/knowledge_base.json")
+S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset-1/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
 MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 LOKI_URL = os.getenv("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
 LLM_N_SAMPLES = int(os.getenv("LLM_N_SAMPLES", "3"))
@@ -68,11 +73,35 @@ def fetch_kb_from_s3(s3_path):
     log.info(f"Successfully loaded KB from S3 ({len(kb)} entries)")
     return kb
 
+def fetch_s3_json(s3_path):
+    """
+    Fetches a JSON object from S3 and converts it to a Python object.
+    """
+    # Parse the S3 URI (e.g., s3://my-bucket/key/path.json)
+    parsed_url = urlparse(s3_path)
+    bucket_name = parsed_url.netloc
+    key = parsed_url.path.lstrip('/')
+
+    # Initialize S3 client (uses environment variables for credentials)
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=S3_REGION
+    )
+
+    # Get the object and read the body
+    response = s3.get_object(Bucket=bucket_name, Key=key)
+    content = response['Body'].read().decode('utf-8')
+        
+    return json.loads(content)
+
 def fetch_kb_from_mlflow(model_name):
     """
     Fetches the Knowledge Base from MLflow using the production alias.
     Falls back to S3_KB_PATH if MLflow is unavailable.
     """
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     client = MlflowClient()
 
     try:
@@ -82,10 +111,12 @@ def fetch_kb_from_mlflow(model_name):
         )
         run_id = model_version.run_id
         log.info(f"Found production KB model version {model_version.version} from run {run_id}")
-
-        artifact_path = client.download_artifacts(run_id, "kb_model")
-        kb_file = os.path.join(artifact_path, "artifacts", "kb_json")
-
+        
+        # Download the KB artifact from the run
+        # The artifact is stored at kb_model/artifacts/kb_json
+        kb_file = client.download_artifacts(run_id, "kb_model/artifacts/built_kb.json", dst_path="./mlflow_artifacts")
+        
+        # Load the KB JSON
         with open(kb_file, "r") as f:
             kb = json.load(f)
 
@@ -211,7 +242,7 @@ def main():
     # Initialize DuckDB S3 connection (must be before KB fetch for S3 fallback)
     init_duckdb_s3()
     # Load Knowledge Base from MLflow (falls back to S3_KB_PATH)
-    kb = fetch_kb_from_mlflow(MLFLOW_KB_MODEL)
+    kb = fetch_s3_json(S3_KB_PATH)
     # Initialize Loki log extractor (Stage 2)
     log_extractor = LokiLogExtractor(LOKI_URL)
 

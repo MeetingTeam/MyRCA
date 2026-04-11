@@ -30,8 +30,8 @@ from common.util import map_status_group
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "redpanda.redpanda.svc.cluster.local:9093")
-INPUT_TOPIC = os.getenv("INPUT_TOPIC", "preprocess-data")
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
+INPUT_TOPIC = os.getenv("INPUT_TOPIC", "traces")
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "anomaly-group")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
 ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_THRESHOLD", "0.3293778896331787"))
@@ -42,7 +42,7 @@ FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "60"))
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset")
+S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
@@ -273,7 +273,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
                     if row == -1 or metric == 0:
                         continue
 
-                    score = float(timestep_loss[b])
+                    score = float(timestep_loss[b, t_idx])
 
                     # Boost score for server errors / OTel error status
                     if df.at[row, "span_status"] == 2 or df.at[row, "http_status"] == 5:
@@ -331,6 +331,9 @@ def main():
         "Consuming from [%s], group=[%s], batch_size=%d, flush_rows=%d, flush_interval=%ds",
         INPUT_TOPIC, CONSUMER_GROUP, BATCH_SIZE, FLUSH_ROW_THRESHOLD, FLUSH_INTERVAL_SECONDS,
     )
+
+    # Initialize DuckDB S3 connection
+    init_duckdb_s3()
 
     total_processed = 0
     write_buffer: list[pd.DataFrame] = []

@@ -632,7 +632,7 @@ Redpanda export deferred to Phase 7.
 ### 7.3 Install Airflow
 - [ ] Install Airflow using Helm chart
   ```bash
-  helm install airflow apache-airflow/airflow \
+  helm install airflow apache-airflow/airflow --version 1.15.0 \
     --namespace airflow \
     -f d:\MyRCA\opensource\airflow\values-dev.yaml \
     --timeout 15m
