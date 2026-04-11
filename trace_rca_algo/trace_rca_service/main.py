@@ -2,11 +2,15 @@ from algo import rank_root_causes
 from preproccessing import build_trace_dags_from_csv
 from log_extractor import LokiLogExtractor
 import llm_rca
+import incident_store
+import api as api_module
 import os
 import time
+import threading
 from confluent_kafka import Consumer, KafkaError, KafkaException
 import json
 import duckdb
+import uvicorn
 from datetime import datetime, timezone
 import requests
 import logging
@@ -155,7 +159,7 @@ def query_spans_by_timestamp(start_dt, end_dt):
 
         # Retry on transient read errors (race condition: anomaly-detection
         # service may be overwriting the parquet file on S3 mid-read).
-        max_retries = 3
+        max_retries = 6
         for attempt in range(max_retries):
             try:
                 result_df = db_con.cursor().execute(query, params).fetchdf()
@@ -164,7 +168,7 @@ def query_spans_by_timestamp(start_dt, end_dt):
             except (UnicodeDecodeError, duckdb.IOException) as read_err:
                 if attempt < max_retries - 1:
                     log.warning("Transient S3 read error (attempt %d/%d): %s", attempt + 1, max_retries, read_err)
-                    time.sleep(2)
+                    time.sleep(1)
                 else:
                     log.warning("S3 read failed after %d attempts, skipping", max_retries)
                     return None
@@ -241,8 +245,16 @@ def main():
     kb = fetch_s3_json(S3_KB_PATH)
     # Initialize Loki log extractor (Stage 2)
     log_extractor = LokiLogExtractor(LOKI_URL)
-    
-    try: 
+
+    # ── Start REST API server in background thread ────────────────
+    api_module.set_db_con(db_con)
+    threading.Thread(
+        target=lambda: uvicorn.run(api_module.app, host="0.0.0.0", port=8080, log_level="warning"),
+        daemon=True,
+    ).start()
+    log.info("API server started on port 8080")
+
+    try:
         while True:
             try:
                 msg = consumer.poll(timeout=1.0)
@@ -272,10 +284,14 @@ def main():
 
                 # ── Stage 2: Log Evidence + LLM Analysis ──────────────
                 llm_result = None
+                logs = {}
                 try:
                     top_k_services = [svc for svc, _ in ranking[:5]]
+                    from datetime import timedelta
+                    log_start = start_dt - timedelta(minutes=5)
+                    log_end = end_dt + timedelta(minutes=5)
                     logs = log_extractor.query_logs_for_services(
-                        top_k_services, start_dt, end_dt
+                        top_k_services, log_start, log_end
                     )
                     llm_result = llm_rca.analyze_with_consistency(
                         ranking, traces, logs, n_samples=LLM_N_SAMPLES
@@ -288,6 +304,15 @@ def main():
                     log.error(f"Stage 2 failed, falling back to Stage 1: {e}", exc_info=True)
 
                 send_rca_notification(ranking, start_dt, end_dt, llm_result)
+
+                # ── Save incident to S3 ──────────────────────────
+                try:
+                    inc = incident_store.build_incident(
+                        ranking, llm_result, logs, traces, start_dt, end_dt
+                    )
+                    incident_store.save_incident(inc)
+                except Exception as e:
+                    log.error(f"Failed to save incident: {e}")
 
             except Exception as e:
                 log.error(f"Error processing RCA task: {e}", exc_info=True)

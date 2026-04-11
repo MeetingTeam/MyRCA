@@ -33,7 +33,7 @@ class LokiLogExtractor:
             end_ns: End time in nanoseconds since epoch.
             limit: Max log lines to return.
         """
-        query = f'{{service_name="{service}"}} |~ "(?i)(error|warn|fatal|exception)"'
+        query = f'{{service_name="{service}"}} | severity_text =~ `ERROR|WARN|FATAL`'
         return self._query(query, start_ns, end_ns, limit)
 
     def query_logs_by_trace(self, trace_id: str, limit: int = 50) -> list[dict]:
@@ -119,6 +119,6 @@ class LokiLogExtractor:
                     "timestamp": ts,
                     "message": line,
                     "service": labels.get("service_name", "unknown"),
-                    "level": labels.get("severity", labels.get("level", "unknown")),
+                    "level": labels.get("severity_text", labels.get("severity", labels.get("level", "unknown"))),
                 })
         return results

@@ -5,3 +5,6 @@ requests
 pandas
 mlflow-skinny
 anthropic
+mlflow
+fastapi
+uvicorn

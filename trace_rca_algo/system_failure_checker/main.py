@@ -110,7 +110,7 @@ def check_system_failures(start_dt, end_dt):
         
         # Retry on transient read errors (race condition: anomaly-detection
         # service may be overwriting the parquet file on S3 mid-read).
-        max_retries = 3
+        max_retries = 6
         result = None
         for attempt in range(max_retries):
             try:
@@ -119,7 +119,7 @@ def check_system_failures(start_dt, end_dt):
             except (UnicodeDecodeError, duckdb.IOException) as read_err:
                 if attempt < max_retries - 1:
                     log.warning("Transient S3 read error (attempt %d/%d): %s", attempt + 1, max_retries, read_err)
-                    time.sleep(2)
+                    time.sleep(1)
                 else:
                     log.warning("S3 read failed after %d attempts, skipping this window", max_retries)
                     return

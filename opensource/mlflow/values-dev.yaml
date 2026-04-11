@@ -1,35 +1,106 @@
-# Resource Quotas
-resources:
-  limits:
-    cpu: 200m
-    memory: 256Mi
-  requests:
-    cpu: 500m
-    memory: 512Mi
+# Bitnami MLflow Helm Chart - Dev Environment
+# Chart: bitnami/mlflow v5.1.17 (appVersion 3.3.2)
+# Usage: helm install mlflow bitnami/mlflow --version 5.1.17 -n mlflow -f values-dev.yaml
 
-# Backend Store (SQLite with Persistence)
-backendStore:
-  postgres:
-    enabled: false # Disable default DB if using SQLite
-  dbUrl: "sqlite:////app/mlflow.db"
+# -- Allow non-Bitnami images (Bitnami images are paywalled) --
+global:
+  security:
+    allowInsecureImages: true
+
+# -- Override image: use official MLflow (Bitnami images are paywalled) --
+image:
+  registry: ghcr.io
+  repository: mlflow/mlflow
+  tag: v3.3.2
+  pullPolicy: IfNotPresent
+
+# -- Tracking Server (the only component we need) --
+tracking:
+  enabled: true
+  replicaCount: 1
+
+  # Recreate strategy: EBS PVC is ReadWriteOnce, can't multi-attach during rolling update
+  updateStrategy:
+    type: Recreate
+
+  # Disable auth for dev
+  auth:
+    enabled: false
+
+  # Service: NodePort for direct access
+  service:
+    type: NodePort
+    ports:
+      http: 5000
+    nodePorts:
+      http: "30002"
+
+  # Persistent storage for file-based backend (SQLite/mlruns)
   persistence:
     enabled: true
-    size: 1Gi
-    mountPath: /app
-    accessMode: ReadWriteOnce
+    size: 2Gi
+    storageClass: ebs-sc
 
-# Artifact Store (S3)
-artifactRoot: "s3://myrca-mlflow-artifacts/"
-extraEnvVars:
-  - name: AWS_ACCESS_KEY_ID
-    value: "YOUR_ACCESS_KEY"
-  - name: AWS_SECRET_ACCESS_KEY
-    value: "YOUR_SECRET_KEY"
-  - name: AWS_DEFAULT_REGION
-    value: "ap-southeast-7"
+  # Resources (dev - keep light)
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
 
-# Web UI Service
-service:
-  type: NodePort
-  port: 5000
-  nodePort: 30002 # Fixed port for Web UI
+  # Security context: official MLflow image runs as root, needs writable fs
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 0
+    runAsNonRoot: false
+    readOnlyRootFilesystem: false
+
+  podSecurityContext:
+    enabled: true
+    fsGroup: 0
+
+  # Override default args: explicit config for tracking server
+  args:
+    - server
+    - --backend-store-uri=/bitnami/mlflow/mlruns
+    - --artifacts-destination=s3://hungtran-mlflow-artifacts
+    - --serve-artifacts
+    - --host=0.0.0.0
+    - --port=5000
+
+  # Extra env vars for AWS region
+  extraEnvVars:
+    - name: AWS_DEFAULT_REGION
+      value: "ap-southeast-1"
+
+# -- Disable Run component (not using MLflow Projects) --
+run:
+  enabled: false
+
+# -- Backend DB: File-based (no PostgreSQL, save resources) --
+postgresql:
+  enabled: false
+
+# externalDatabase.host left empty -> Bitnami falls back to file backend
+# Backend store: /bitnami/mlflow/mlruns (persisted via PVC)
+
+# -- Artifact Store: External AWS S3 (disable MinIO) --
+minio:
+  enabled: false
+
+# Pre-requisite: create the secret before helm install/upgrade
+#   kubectl create secret generic mlflow-aws-secret -n mlflow \
+#     --from-literal=AWS_ACCESS_KEY_ID=<your-access-key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<your-secret-key>
+externalS3:
+  host: "s3.ap-southeast-1.amazonaws.com"
+  port: 443
+  protocol: "https"
+  bucket: "hungtran-mlflow-artifacts"
+  serveArtifacts: true
+  useCredentialsInSecret: true
+  existingSecret: "mlflow-aws-secret"
+  existingSecretAccessKeyIDKey: "AWS_ACCESS_KEY_ID"
+  existingSecretKeySecretKey: "AWS_SECRET_ACCESS_KEY"
