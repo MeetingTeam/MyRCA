@@ -1,9 +1,11 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { fetchIncidents } from '../api'
+import { useAppFilter } from '../App'
 import SeverityBadge from './severity-badge'
 
 export default function IncidentList() {
+  const { selectedApps } = useAppFilter()
   const [incidents, setIncidents] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -14,12 +16,35 @@ export default function IncidentList() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
 
+  // Refetch when selected apps change
   useEffect(() => {
-    fetchIncidents()
-      .then(setIncidents)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [])
+    const abortController = new AbortController()
+    setLoading(true)
+    setError(null)
+
+    const params = selectedApps.length > 0
+      ? { appIds: selectedApps }
+      : {}
+
+    fetchIncidents(params)
+      .then(data => {
+        if (!abortController.signal.aborted) {
+          setIncidents(data)
+        }
+      })
+      .catch(e => {
+        if (!abortController.signal.aborted) {
+          setError(e.message)
+        }
+      })
+      .finally(() => {
+        if (!abortController.signal.aborted) {
+          setLoading(false)
+        }
+      })
+
+    return () => abortController.abort()
+  }, [selectedApps])
 
   // Derive unique services from loaded data
   const services = useMemo(() => {
@@ -62,7 +87,11 @@ export default function IncidentList() {
       <div className="text-center py-20">
         <div className="text-4xl mb-4">&#128994;</div>
         <h2 className="text-xl text-gray-400">No incidents detected</h2>
-        <p className="text-gray-500 mt-2">System is healthy. Incidents will appear here when anomalies are detected.</p>
+        <p className="text-gray-500 mt-2">
+          {selectedApps.length > 0
+            ? `No incidents found for selected apps: ${selectedApps.join(', ')}`
+            : 'System is healthy. Incidents will appear here when anomalies are detected.'}
+        </p>
       </div>
     )
   }
@@ -152,6 +181,7 @@ export default function IncidentList() {
           <thead>
             <tr className="border-b border-gray-700 text-gray-400 text-sm">
               <th className="text-left px-4 py-3">Time Window</th>
+              <th className="text-left px-4 py-3">App</th>
               <th className="text-left px-4 py-3">Root Cause</th>
               <th className="text-left px-4 py-3">Confidence</th>
               <th className="text-left px-4 py-3">Severity</th>
@@ -169,9 +199,18 @@ export default function IncidentList() {
               return (
                 <tr key={inc.incident_id} className="border-b border-gray-700/50 hover:bg-dark-700 transition">
                   <td className="px-4 py-3">
-                    <Link to={`/incidents/${inc.incident_id}`} className="text-blue-400 hover:underline text-sm">
+                    <Link to={`/incidents/${inc.incident_id}${inc.app_id ? `?app_id=${inc.app_id}` : ''}`} className="text-blue-400 hover:underline text-sm">
                       {start}
                     </Link>
+                  </td>
+                  <td className="px-4 py-3">
+                    {inc.app_id ? (
+                      <span className="px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded text-xs font-medium">
+                        {inc.app_id}
+                      </span>
+                    ) : (
+                      <span className="text-gray-500 text-xs">—</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 font-mono text-sm">{rootSvc}</td>
                   <td className="px-4 py-3 text-sm">
@@ -186,7 +225,7 @@ export default function IncidentList() {
             })}
             {filteredIncidents.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
+                <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
                   No incidents match the current filters
                 </td>
               </tr>
@@ -198,6 +237,7 @@ export default function IncidentList() {
       {/* Result count */}
       <div className="mt-2 text-xs text-gray-500 text-right">
         Showing {filteredIncidents.length} of {incidents.length} incidents
+        {selectedApps.length > 0 && ` (filtered by ${selectedApps.length} app${selectedApps.length > 1 ? 's' : ''})`}
       </div>
     </div>
   )

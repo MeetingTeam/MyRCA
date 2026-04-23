@@ -14,6 +14,11 @@ ingestor:
 
   otel_config:
     processors:
+      filter/drop_no_app_id:
+        error_mode: ignore
+        traces:
+          span:
+            - 'resource.attributes["app_id"] == nil'
       batch:
         timeout: 3s
         send_batch_size: 8

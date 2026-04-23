@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { fetchIncident } from '../api'
 import SeverityBadge from './severity-badge'
 import PropagationChain from './propagation-chain'
@@ -7,16 +7,19 @@ import LogEvidence from './log-evidence'
 
 export default function IncidentDetail() {
   const { id } = useParams()
+  const [searchParams] = useSearchParams()
+  const appIdHint = searchParams.get('app_id')
+
   const [incident, setIncident] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    fetchIncident(id)
+    fetchIncident(id, appIdHint)
       .then(setIncident)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
-  }, [id])
+  }, [id, appIdHint])
 
   if (loading) return <div className="text-center py-12 text-gray-400">Loading...</div>
   if (error) return <div className="text-center py-12 text-red-400">Error: {error}</div>
@@ -33,9 +36,14 @@ export default function IncidentDetail() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <Link to="/" className="text-gray-400 hover:text-white">&larr; Back</Link>
         <h1 className="text-xl font-bold">Incident Analysis</h1>
+        {incident.app_id && (
+          <span className="px-3 py-1 bg-blue-900/50 text-blue-300 rounded-full text-sm font-medium">
+            {incident.app_id}
+          </span>
+        )}
         <SeverityBadge level={s2.confidence_level} />
       </div>
 
