@@ -106,31 +106,52 @@ def list_incidents(db_con, app_id: str = None, app_ids: list[str] = None, limit:
         app_ids: Filter by multiple app_ids (optional)
         limit: Max number of incidents to return (default 100)
     """
+    # Build WHERE clause for app_id filtering (with validation to prevent SQL injection)
+    where_clause = ""
+    if app_id:
+        if not _validate_app_id(app_id):
+            log.warning("Invalid app_id format: %s", app_id)
+            return []
+        where_clause = f"WHERE app_id = '{app_id}'"
+    elif app_ids:
+        valid_ids = [a for a in app_ids if _validate_app_id(a)]
+        if not valid_ids:
+            log.warning("No valid app_ids provided")
+            return []
+        app_ids_str = ", ".join(f"'{a}'" for a in valid_ids)
+        where_clause = f"WHERE app_id IN ({app_ids_str})"
+
+    # Clamp limit to prevent abuse
+    limit = min(max(1, limit), 1000)
+
+    # Query legacy path (root-level JSON files without app_id)
+    legacy_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/*.json"
+    results = []
+
     try:
-        # Use list of glob patterns to match both legacy (root-level) and app-partitioned paths
-        legacy_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/*.json"
-        partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
-        glob_pattern = f"['{legacy_glob}', '{partitioned_glob}']"
+        legacy_query = f"""
+            SELECT
+                incident_id::VARCHAR AS incident_id,
+                NULL::VARCHAR AS app_id,
+                created_at,
+                time_window,
+                stage2_result.root_cause AS root_cause,
+                stage2_result.confidence_level AS confidence_level,
+                stage1_ranking[1].service AS top_service,
+                stage1_ranking[1].score AS top_score,
+                trace_summary,
+                status
+            FROM read_json_auto('{legacy_glob}')
+        """
+        df = db_con.cursor().execute(legacy_query).fetchdf()
+        results.extend(json.loads(df.to_json(orient="records")))
+    except Exception as e:
+        log.debug("No legacy incidents found: %s", e)
 
-        # Build WHERE clause for app_id filtering (with validation to prevent SQL injection)
-        where_clause = ""
-        if app_id:
-            if not _validate_app_id(app_id):
-                log.warning("Invalid app_id format: %s", app_id)
-                return []
-            where_clause = f"WHERE app_id = '{app_id}'"
-        elif app_ids:
-            valid_ids = [a for a in app_ids if _validate_app_id(a)]
-            if not valid_ids:
-                log.warning("No valid app_ids provided")
-                return []
-            app_ids_str = ", ".join(f"'{a}'" for a in valid_ids)
-            where_clause = f"WHERE app_id IN ({app_ids_str})"
-
-        # Clamp limit to prevent abuse
-        limit = min(max(1, limit), 1000)
-
-        query = f"""
+    # Query app-partitioned path
+    partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
+    try:
+        partitioned_query = f"""
             SELECT
                 incident_id::VARCHAR AS incident_id,
                 app_id,
@@ -142,34 +163,39 @@ def list_incidents(db_con, app_id: str = None, app_ids: list[str] = None, limit:
                 stage1_ranking[1].score AS top_score,
                 trace_summary,
                 status
-            FROM read_json_auto({glob_pattern}, union_by_name=true)
-            {where_clause}
-            ORDER BY created_at DESC
-            LIMIT {limit}
+            FROM read_json_auto('{partitioned_glob}')
         """
-        df = db_con.cursor().execute(query).fetchdf()
-        return json.loads(df.to_json(orient="records"))
+        df = db_con.cursor().execute(partitioned_query).fetchdf()
+        results.extend(json.loads(df.to_json(orient="records")))
     except Exception as e:
-        log.warning("Failed to list incidents: %s", e)
-        return []
+        log.debug("No app-partitioned incidents found: %s", e)
+
+    # Apply filtering and sorting in Python
+    if app_id:
+        results = [r for r in results if r.get("app_id") == app_id]
+    elif app_ids:
+        valid_ids = set(app_ids)
+        results = [r for r in results if r.get("app_id") in valid_ids]
+
+    # Sort by created_at descending and limit
+    results.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return results[:limit]
 
 
 def list_applications(db_con) -> list[str]:
-    """List all unique app_ids from incidents."""
+    """List all unique app_ids from incidents (only from app-partitioned paths)."""
+    partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
     try:
-        legacy_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/*.json"
-        partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
-        glob_pattern = f"['{legacy_glob}', '{partitioned_glob}']"
         query = f"""
             SELECT DISTINCT app_id
-            FROM read_json_auto({glob_pattern}, union_by_name=true)
+            FROM read_json_auto('{partitioned_glob}')
             WHERE app_id IS NOT NULL
             ORDER BY app_id
         """
         df = db_con.cursor().execute(query).fetchdf()
         return df["app_id"].tolist()
     except Exception as e:
-        log.warning("Failed to list applications: %s", e)
+        log.debug("No app-partitioned incidents found: %s", e)
         return []
 
 
