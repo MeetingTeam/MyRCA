@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: trace-rca-service
-          image: asdads6495/myrca-trace-rca-service:1.1.0-ac13d06
+          image: asdads6495/myrca-trace-rca-service:1.1.0-ac099c7
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
