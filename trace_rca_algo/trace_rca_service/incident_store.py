@@ -142,7 +142,7 @@ def list_incidents(db_con, app_id: str = None, app_ids: list[str] = None, limit:
                 stage1_ranking[1].score AS top_score,
                 trace_summary,
                 status
-            FROM read_json_auto('{glob_pattern}')
+            FROM read_json_auto({glob_pattern}, union_by_name=true)
             {where_clause}
             ORDER BY created_at DESC
             LIMIT {limit}
@@ -162,7 +162,7 @@ def list_applications(db_con) -> list[str]:
         glob_pattern = f"['{legacy_glob}', '{partitioned_glob}']"
         query = f"""
             SELECT DISTINCT app_id
-            FROM read_json_auto('{glob_pattern}')
+            FROM read_json_auto({glob_pattern}, union_by_name=true)
             WHERE app_id IS NOT NULL
             ORDER BY app_id
         """
