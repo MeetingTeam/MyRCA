@@ -107,8 +107,10 @@ def list_incidents(db_con, app_id: str = None, app_ids: list[str] = None, limit:
         limit: Max number of incidents to return (default 100)
     """
     try:
-        # Build glob pattern for S3 paths (both legacy and app-partitioned)
-        glob_pattern = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/**/*.json"
+        # Use list of glob patterns to match both legacy (root-level) and app-partitioned paths
+        legacy_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/*.json"
+        partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
+        glob_pattern = f"['{legacy_glob}', '{partitioned_glob}']"
 
         # Build WHERE clause for app_id filtering (with validation to prevent SQL injection)
         where_clause = ""
@@ -155,7 +157,9 @@ def list_incidents(db_con, app_id: str = None, app_ids: list[str] = None, limit:
 def list_applications(db_con) -> list[str]:
     """List all unique app_ids from incidents."""
     try:
-        glob_pattern = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/**/*.json"
+        legacy_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/*.json"
+        partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
+        glob_pattern = f"['{legacy_glob}', '{partitioned_glob}']"
         query = f"""
             SELECT DISTINCT app_id
             FROM read_json_auto('{glob_pattern}')
