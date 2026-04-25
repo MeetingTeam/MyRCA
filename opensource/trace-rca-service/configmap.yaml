@@ -18,3 +18,5 @@ data:
   LLM_N_SAMPLES: "3"
   ANTHROPIC_MODEL: "claude-haiku-4-5-20251001"
   ANTHROPIC_BASE_URL: "https://taphoaapi.info.vn/"
+
+  MLFLOW_KB_VERSION: "1.0"

@@ -14,8 +14,6 @@ import uvicorn
 from datetime import datetime, timezone
 import requests
 import logging
-from mlflow import MlflowClient
-import mlflow
 import boto3
 from urllib.parse import urlparse
 
@@ -35,8 +33,6 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset-1/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
-MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 LOKI_URL = os.getenv("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
 LLM_N_SAMPLES = int(os.getenv("LLM_N_SAMPLES", "3"))
 
@@ -65,14 +61,6 @@ def init_duckdb_s3():
         );
     """)
 
-def fetch_kb_from_s3(s3_path):
-    """Fetch Knowledge Base JSON directly from S3 via DuckDB."""
-    log.info(f"Loading KB from S3: {s3_path}")
-    result = db_con.execute(f"SELECT * FROM read_json_auto('{s3_path}')").fetchdf()
-    kb = json.loads(result.to_json(orient="records"))[0]
-    log.info(f"Successfully loaded KB from S3 ({len(kb)} entries)")
-    return kb
-
 def fetch_s3_json(s3_path):
     """
     Fetches a JSON object from S3 and converts it to a Python object.
@@ -95,40 +83,6 @@ def fetch_s3_json(s3_path):
     content = response['Body'].read().decode('utf-8')
         
     return json.loads(content)
-
-def fetch_kb_from_mlflow(model_name):
-    """
-    Fetches the Knowledge Base from MLflow using the production alias.
-    Falls back to S3_KB_PATH if MLflow is unavailable.
-    """
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    client = MlflowClient()
-
-    try:
-        model_version = client.get_model_version_by_alias(
-            name=model_name,
-            alias="production"
-        )
-        run_id = model_version.run_id
-        log.info(f"Found production KB model version {model_version.version} from run {run_id}")
-        
-        # Download the KB artifact from the run
-        # The artifact is stored at kb_model/artifacts/kb_json
-        kb_file = client.download_artifacts(run_id, "kb_model/artifacts/built_kb.json", dst_path="./mlflow_artifacts")
-        
-        # Load the KB JSON
-        with open(kb_file, "r") as f:
-            kb = json.load(f)
-
-        log.info(f"Successfully loaded KB from MLflow (version {model_version.version})")
-        return kb
-
-    except Exception as e:
-        log.warning(f"MLflow KB fetch failed: {e}")
-        if S3_KB_PATH:
-            log.info("Falling back to S3 KB path...")
-            return fetch_kb_from_s3(S3_KB_PATH)
-        raise
 
 def query_spans_by_timestamp(start_dt, end_dt):
     """
@@ -241,8 +195,11 @@ def main():
 
     # Initialize DuckDB S3 connection (must be before KB fetch for S3 fallback)
     init_duckdb_s3()
+
     # Load Knowledge Base from MLflow (falls back to S3_KB_PATH)
     kb = fetch_s3_json(S3_KB_PATH)
+    print(f"Loaded KB with {len(kb)} entries")
+    
     # Initialize Loki log extractor (Stage 2)
     log_extractor = LokiLogExtractor(LOKI_URL)
 

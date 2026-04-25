@@ -1,15 +1,11 @@
 import json
-import pandas as pd
 import duckdb
 import os
 from datetime import datetime, timedelta, timezone
 import json
+from MyRCA.trace_rca_algo.kb_builder.kb_building import train_knowledge_base
 import mlflow
-import mlflow.pyfunc
-from mlflow import MlflowClient
-from kb_building import train_knowledge_base
-import boto3
-from urllib.parse import urlparse
+import pandas as pd
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
@@ -18,16 +14,16 @@ S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
-TIME_WINDOW_DAYS = int(os.getenv("TIME_WINDOW_DAYS", "30"))
-DATASET_LIMIT = int(os.getenv("DATASET_LIMIT", "500000"))
+TIME_WINDOW_DAYS = int(os.getenv("TIME_WINDOW_DAYS", "2"))
+DATASET_LIMIT = int(os.getenv("DATASET_LIMIT", "10000"))
 
 AIRFLOW_RUN_ID = os.getenv("AIRFLOW_RUN_ID", "manual_run")
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://34.226.226.116:30002")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
 MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 
 # Initialize DuckDB connection
-db_con = duckdb.connect()
+db_con = duckdb.connect(database=':memory:') 
 db_con.execute("INSTALL httpfs; LOAD httpfs;")
 db_con.execute(f"""
         SET s3_endpoint='{S3_ENDPOINT}';
@@ -38,69 +34,51 @@ db_con.execute(f"""
         SET s3_url_style='path';
 """)
 
-# Initialize MLflow (ensure your SQLite/Docker server is running)
+# Initialize MLflow
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-client = MlflowClient()
-
-def safe_decode(val):
-    if isinstance(val, bytes):
-        return val.decode('utf-16', errors='replace') # Replaces bad bytes with 
-    return val
-
-class KBModelWrapper(mlflow.pyfunc.PythonModel):
-    """Wraps the KB JSON so MLflow can manage it as a Model."""
-    def load_context(self, context):
-        with open(context.artifacts["kb_json"], 'r') as f:
-            self.kb_data = json.load(f)
-
-def get_production_kb():
-    """Fetches the current production KB JSON data from MLflow."""
-    try:
-        # Load directly using the @production alias
-        model_uri = f"models:/{MLFLOW_KB_MODEL}@production"
-        prod_model = mlflow.pyfunc.load_model(model_uri)
-        # Access the raw dictionary from the wrapper
-        return prod_model._model_impl.python_model.kb_data
-    except Exception:
-        print("No production model found. Starting fresh.")
-        return None
 
 def register_to_mlflow(new_kb_dict):
-    # 1. Comparison logic
-    current_kb = get_production_kb()
-    
-    if current_kb == new_kb_dict: # Simple dict equality check
-        print("No changes detected in Knowledge Base. Skipping update.")
-        return
+    mlflow_artifact_path = "kb_json"
 
-    print("Changes detected. Registering new version...")
+    # 1. Get current production KB
+    try:
+        model_uri = f"models:/{MLFLOW_KB_MODEL}@production"
+        current_kb = mlflow.pyfunc.load_model(model_uri).predict(None)
+    except Exception:
+        current_kb = None
 
-    # 2. Upload and Register with MLflow
-    # Save locally first for MLflow to pick up
-    temp_path = "built_kb.json"
-    with open(temp_path, "w") as f:
+    # 2. Simple comparison
+    if current_kb == new_kb_dict:
+        print("No change in KB. Skip logging.")
+        return current_kb
+
+    print("Logging new KB to MLflow...")
+
+    # 3. Write file
+    kb_path = "built_kb.json"
+    with open(kb_path, "w") as f:
         json.dump(new_kb_dict, f)
 
-    with mlflow.start_run(run_name=f"Airflow_{AIRFLOW_RUN_ID}"):
-        # Store Airflow metadata
+    # 4. Minimal MLflow model wrapper
+    class KBModel(mlflow.pyfunc.PythonModel):
+        def load_context(self, context):
+            with open(context.artifacts[mlflow_artifact_path], "r") as f:
+                self.kb = json.load(f)
+
+        def predict(self, context, model_input=None):
+            return self.kb
+
+    # 5. Log model
+    with mlflow.start_run() as run:
         mlflow.set_tag("airflow_run_id", AIRFLOW_RUN_ID)
-        
-        # Log as a Model to enable Aliases
-        model_info = mlflow.pyfunc.log_model(
+
+        print("Tracking URI:", mlflow.get_tracking_uri())
+        mlflow.pyfunc.log_model(
             artifact_path="kb_model",
-            python_model=KBModelWrapper(),
-            artifacts={"kb_json": temp_path},
+            python_model=KBModel(),
+            artifacts={mlflow_artifact_path: kb_path},
             registered_model_name=MLFLOW_KB_MODEL
         )
-        
-        # 3. Promote to Production Alias
-        # This automatically moves @production from the old version to this one
-        # client.set_registered_model_alias(
-        #     name=MLFLOW_KB_MODEL,
-        #     alias="production",
-        #     version=model_info.registered_model_version
-        # )
-        # print(f"KB Version {model_info.registered_model_version} is now Production.")
 
 def main(): 
     end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -109,16 +87,17 @@ def main():
     end_date_str = end_dt.strftime("%Y-%m-%d")
     
     # This will print exactly what is breaking before it hits DuckDB
-    df = db_con.execute("""
+    df = db_con.cursor().execute("""
         SELECT * FROM read_parquet(?, hive_partitioning = 1)
         WHERE date_part BETWEEN ? AND ?
         LIMIT ?
     """, [
-        f's3://{S3_BUCKET}/anomalies/data.parquet/*/*.parquet',
+        f's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet',
         start_date_str,
         end_date_str,
         DATASET_LIMIT
     ]).fetchdf()
+    print(f"Fetched dataset successfully with length: {len(df)}")
 
     if df.empty:
         print(f"No dataset found within time range {start_date_str} to {end_date_str}. Please check your S3 path and data availability.")
