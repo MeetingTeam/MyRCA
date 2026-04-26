@@ -48,8 +48,8 @@ def train_knowledge_base(df):
 
         parent_span = span_dict.get(span["parent_span_id"])
         # Skip for CLIENT-SERVER and PRODUCER-CONSUMER kind pairs
-        # if (parent_span["kind"]==3 and span["kind"]==2) or (parent_span["kind"]==4 and span["kind"]==5):
-        #     continue   
+        if ("kind" in parent_span) and ((parent_span["kind"]==3 and span["kind"]==2) or (parent_span["kind"]==4 and span["kind"]==5)):
+            continue   
         
         parent_key=f"{parent_span['service']}/{parent_span['operation']}"
         child_key=f"{span['service']}/{span['operation']}"
