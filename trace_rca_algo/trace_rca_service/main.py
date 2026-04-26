@@ -14,8 +14,6 @@ import uvicorn
 from datetime import datetime, timezone
 import requests
 import logging
-from mlflow import MlflowClient
-import mlflow
 import boto3
 from urllib.parse import urlparse
 
@@ -35,8 +33,6 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset-1/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:15000")
-MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
 LOKI_URL = os.getenv("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
 LLM_N_SAMPLES = int(os.getenv("LLM_N_SAMPLES", "3"))
 
@@ -64,14 +60,6 @@ def init_duckdb_s3():
             URL_STYLE 'path'
         );
     """)
-
-def fetch_kb_from_s3(s3_path):
-    """Fetch Knowledge Base JSON directly from S3 via DuckDB."""
-    log.info(f"Loading KB from S3: {s3_path}")
-    result = db_con.execute(f"SELECT * FROM read_json_auto('{s3_path}')").fetchdf()
-    kb = json.loads(result.to_json(orient="records"))[0]
-    log.info(f"Successfully loaded KB from S3 ({len(kb)} entries)")
-    return kb
 
 def fetch_s3_json(s3_path):
     """
@@ -253,8 +241,11 @@ def main():
 
     # Initialize DuckDB S3 connection (must be before KB fetch for S3 fallback)
     init_duckdb_s3()
+
     # Load Knowledge Base from MLflow (falls back to S3_KB_PATH)
     kb = fetch_s3_json(S3_KB_PATH)
+    print(f"Loaded KB with {len(kb)} entries")
+    
     # Initialize Loki log extractor (Stage 2)
     log_extractor = LokiLogExtractor(LOKI_URL)
 
