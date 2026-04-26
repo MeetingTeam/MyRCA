@@ -29,9 +29,9 @@ data:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [{{ keys .Values.ingestor.otel_config.processors | join ", " }}]
+          processors: [filter/drop_no_app_id, batch]
           exporters: [otlp, kafka]
         logs:
           receivers: [otlp]
-          processors: [{{ keys .Values.ingestor.otel_config.processors | join ", " }}]
+          processors: [batch]
           exporters: [otlphttp/loki]

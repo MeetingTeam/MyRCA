@@ -50,6 +50,12 @@ def get_service_instance_id(resource):
     return get_resource_attribute(resource, "service.instance.id")
 
 
+def get_app_id(resource):
+    """Extract app_id from resource attributes. Returns None if not found."""
+    app_id = get_resource_attribute(resource, "app_id")
+    return app_id if app_id != UNKNOWN else None
+
+
 def get_span_attributes(span):
     fields = {}
     for attr in span.get("attributes", []):
@@ -99,6 +105,11 @@ def extract_records(otlp_json: dict) -> list[dict]:
         resource = resource_span.get("resource", {})
         service_name = get_service_name(resource)
         instance_id = get_service_instance_id(resource)
+        app_id = get_app_id(resource)
+
+        if not app_id:
+            log.warning("Skipping resource spans without app_id from service=%s", service_name)
+            continue
 
         for scope_span in resource_span.get("scopeSpans", []):
             lib = scope_span.get("scope", {}).get("name", "")
@@ -112,6 +123,7 @@ def extract_records(otlp_json: dict) -> list[dict]:
                 http_status = http_attrs.get("http_status", "0")
 
                 record = {
+                    "app_id": app_id,
                     "instrumentation_library": lib,
                     "service": service_name,
                     "service_instance_id": instance_id,
@@ -131,8 +143,8 @@ def extract_records(otlp_json: dict) -> list[dict]:
 
 
 def build_partition_key(record: dict) -> str:
-    """Build partition key: <service>/<operation>/<http_status>/<service.instance.id>"""
-    return f"{record['service']}/{record['operation']}/{record['http_status']}/{record['service_instance_id']}"
+    """Build partition key: <app_id>/<service>/<operation>/<http_status>"""
+    return f"{record['app_id']}/{record['service']}/{record['operation']}/{record['http_status']}"
 
 # ── Kafka producer callback ──────────────────────────────────────────────────
 

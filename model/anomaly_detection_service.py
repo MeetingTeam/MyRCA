@@ -163,6 +163,7 @@ def write_to_s3(result_df: pd.DataFrame):
             COPY (
                 SELECT
                     make_timestamp(startTime::BIGINT // 1000) AS timestamp,
+                    app_id,
                     traceId AS trace_id,
                     spanId AS span_id,
                     parentSpanId AS parent_span_id,
@@ -211,7 +212,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
     df = pd.DataFrame(records)
 
     # Validate required columns
-    required_cols = ["service", "operation", "http_status", "duration",
+    required_cols = ["app_id", "service", "operation", "http_status", "duration",
                      "spanId", "parentSpanId", "traceId", "startTime", "span_status", "kind"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:

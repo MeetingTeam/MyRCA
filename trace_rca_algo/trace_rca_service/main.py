@@ -84,32 +84,78 @@ def fetch_s3_json(s3_path):
         
     return json.loads(content)
 
-def query_spans_by_timestamp(start_dt, end_dt):
+def fetch_kb_from_mlflow(model_name):
+    """
+    Fetches the Knowledge Base from MLflow using the production alias.
+    Falls back to S3_KB_PATH if MLflow is unavailable.
+    """
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    client = MlflowClient()
+
+    try:
+        model_version = client.get_model_version_by_alias(
+            name=model_name,
+            alias="production"
+        )
+        run_id = model_version.run_id
+        log.info(f"Found production KB model version {model_version.version} from run {run_id}")
+        
+        # Download the KB artifact from the run
+        # The artifact is stored at kb_model/artifacts/kb_json
+        kb_file = client.download_artifacts(run_id, "kb_model/artifacts/built_kb.json", dst_path="./mlflow_artifacts")
+        
+        # Load the KB JSON
+        with open(kb_file, "r") as f:
+            kb = json.load(f)
+
+        log.info(f"Successfully loaded KB from MLflow (version {model_version.version})")
+        return kb
+
+    except Exception as e:
+        log.warning(f"MLflow KB fetch failed: {e}")
+        if S3_KB_PATH:
+            log.info("Falling back to S3 KB path...")
+            return fetch_kb_from_s3(S3_KB_PATH)
+        raise
+
+def query_spans_by_timestamp(start_dt, end_dt, app_id: str = None):
     """
     Query spans from S3 within the given timestamp range.
+    If app_id is provided, filter by app_id.
     Returns DataFrame with span data.
     """
     try:
+        # Build app_id filter clause
+        app_filter = "AND app_id = ?" if app_id else ""
+
         # Query spans within timestamp range
         query = f"""
             WITH anomalous_traces AS (
-                SELECT DISTINCT trace_id 
+                SELECT DISTINCT trace_id
                 FROM 's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet'
                 WHERE date_part BETWEEN ? AND ?
                 AND is_anomaly = True
                 AND "timestamp" BETWEEN ? AND ?
+                {app_filter}
             )
             SELECT * FROM 's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet'
             WHERE date_part BETWEEN ? AND ?
             AND trace_id IN (SELECT trace_id FROM anomalous_traces)
+            {app_filter}
         """
 
         # Pass parameters safely to DuckDB
         params = [
             start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"),
             start_dt, end_dt,
-            start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
         ]
+        if app_id:
+            params.append(app_id)
+        params.extend([
+            start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
+        ])
+        if app_id:
+            params.append(app_id)
 
         # Retry on transient read errors (race condition: anomaly-detection
         # service may be overwriting the parquet file on S3 mid-read).
@@ -222,14 +268,15 @@ def main():
                 if not "start_dt" in record or not "end_dt" in record:
                     log.error("Missing start_dt or end_dt in record")
                     continue
-                
+
                 # Convert timestamps to datetime objects
                 start_dt = datetime.fromisoformat(record.get("start_dt"))
                 end_dt = datetime.fromisoformat(record.get("end_dt"))
-                log.info(f"Processing RCA task: {start_dt} to {end_dt}")
+                app_id = record.get("app_id")
+                log.info(f"Processing RCA task: app={app_id}, {start_dt} to {end_dt}")
 
-                # Query spans from S3
-                spans_df = query_spans_by_timestamp(start_dt, end_dt)
+                # Query spans from S3 (filter by app_id if provided)
+                spans_df = query_spans_by_timestamp(start_dt, end_dt, app_id)
 
                 if spans_df is None or spans_df.empty:
                     log.warning("No spans found for the given time range")
@@ -265,7 +312,7 @@ def main():
                 # ── Save incident to S3 ──────────────────────────
                 try:
                     inc = incident_store.build_incident(
-                        ranking, llm_result, logs, traces, start_dt, end_dt
+                        ranking, llm_result, logs, traces, start_dt, end_dt, app_id
                     )
                     incident_store.save_incident(inc)
                 except Exception as e:

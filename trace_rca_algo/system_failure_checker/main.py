@@ -95,6 +95,7 @@ def check_system_failures(start_dt, end_dt):
 
         query = f"""
             SELECT
+                app_id,
                 service,
                 operation,
                 COUNT(*) as total_spans,
@@ -103,7 +104,7 @@ def check_system_failures(start_dt, end_dt):
             FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/*/*.parquet', hive_partitioning = 1)
             WHERE date_part BETWEEN '{start_date_str}' AND '{end_date_str}'
               AND "timestamp" BETWEEN '{start_ts_str}'::TIMESTAMP AND '{end_ts_str}'::TIMESTAMP
-            GROUP BY service, operation
+            GROUP BY app_id, service, operation
             HAVING abnormal_spans > 0
             ORDER BY abnormal_ratio DESC
         """
@@ -128,14 +129,27 @@ def check_system_failures(start_dt, end_dt):
             log.info("No anomalies found in window %s to %s", start_ts_str, end_ts_str)
             return
 
-        abnormal_services = result[result['abnormal_ratio'] > FAILURE_THRESHOLD]['service'].unique().tolist()
+        failures = result[result['abnormal_ratio'] > FAILURE_THRESHOLD]
 
-        if abnormal_services:
-            log.warning("FAILURE DETECTED: %s", abnormal_services)
-            record = {"start_dt": start_dt.isoformat(), "end_dt": end_dt.isoformat()}
+        if failures.empty:
+            log.info("No failures above threshold in window %s to %s", start_ts_str, end_ts_str)
+            return
+
+        # Group failures by app_id and send separate RCA tasks
+        for app_id in failures['app_id'].unique():
+            app_failures = failures[failures['app_id'] == app_id]
+            abnormal_services = app_failures['service'].unique().tolist()
+
+            log.warning("FAILURE DETECTED for app=%s: %s", app_id, abnormal_services)
+            record = {
+                "app_id": app_id,
+                "start_dt": start_dt.isoformat(),
+                "end_dt": end_dt.isoformat()
+            }
             producer.produce(OUTPUT_TOPIC, json.dumps(record).encode("utf-8"), callback=_delivery_report)
-            producer.flush()
             send_failure_notification(abnormal_services, start_dt, end_dt)
+
+        producer.flush()
 
     except Exception as e:
         log.error("Error in check_system_failures: %s", e, exc_info=True)

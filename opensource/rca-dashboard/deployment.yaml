@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rca-dashboard
+  namespace: rca
+  labels:
+    app: rca-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rca-dashboard
+  template:
+    metadata:
+      labels:
+        app: rca-dashboard
+    spec:
+      containers:
+        - name: rca-dashboard
+          image: asdads6495/myrca-rca-dashboard:1.1.0-ac13d06
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
