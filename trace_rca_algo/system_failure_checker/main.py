@@ -11,14 +11,15 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from confluent_kafka import Producer
 import uvicorn
+import time
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
 OUTPUT_TOPIC = os.getenv("INPUT_TOPIC", "rca-task-data")
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
-S3_REGION = os.getenv("S3_REGION", "ap-southeast-7")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset")
+S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
+S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
@@ -64,7 +65,7 @@ def init_duckdb_s3():
         );
     """)
 
-def send_failure_notification(abnormal_services, start_dt, end_dt):
+def send_failure_notification(app_id, abnormal_services, start_dt, end_dt):
     if not DISCORD_WEBHOOK_URL: return
     
     start_ts = int(start_dt.replace(tzinfo=timezone.utc).timestamp())
@@ -75,6 +76,7 @@ def send_failure_notification(abnormal_services, start_dt, end_dt):
 ## ⚡ Alert: System Failure
 `Time Window:` {discord_time}
 `Status:` 🔍 **Running RCA Algorithm**
+`App ID:` {app_id}
 `Failure Services:` {', '.join(abnormal_services)}
     """
     try:
@@ -91,6 +93,7 @@ def check_system_failures(start_dt, end_dt):
         end_date_str = end_dt.strftime("%Y-%m-%d")
         start_ts_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        record_timestamp = time.time_ns()
         print(f"Querying spans from {start_ts_str} to {end_ts_str}...")
 
         query = f"""
@@ -101,7 +104,7 @@ def check_system_failures(start_dt, end_dt):
                 COUNT(*) as total_spans,
                 SUM(is_anomaly::INT) as abnormal_spans,
                 ROUND(AVG(is_anomaly::INT), 4) as abnormal_ratio
-            FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/*/*.parquet', hive_partitioning = 1)
+            FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet', hive_partitioning = 1)
             WHERE date_part BETWEEN '{start_date_str}' AND '{end_date_str}'
               AND "timestamp" BETWEEN '{start_ts_str}'::TIMESTAMP AND '{end_ts_str}'::TIMESTAMP
             GROUP BY app_id, service, operation
@@ -144,10 +147,11 @@ def check_system_failures(start_dt, end_dt):
             record = {
                 "app_id": app_id,
                 "start_dt": start_dt.isoformat(),
-                "end_dt": end_dt.isoformat()
+                "end_dt": end_dt.isoformat(),
+                "record_timestamp": record_timestamp
             }
             producer.produce(OUTPUT_TOPIC, json.dumps(record).encode("utf-8"), callback=_delivery_report)
-            send_failure_notification(abnormal_services, start_dt, end_dt)
+            send_failure_notification(app_id, abnormal_services, start_dt, end_dt)
 
         producer.flush()
 

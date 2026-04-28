@@ -5,12 +5,12 @@ from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperato
 from kubernetes.client import models as k8s
 import os
 
-KB_DEPLOY_IMAGE = os.getenv("KB_BUILDER_IMAGE", "hungtran679/kb_deploy:latest")
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
-MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
+KB_DEPLOY_IMAGE = "hungtran679/kb_deploy:latest"
+MLFLOW_TRACKING_URI = "http://mlflow-tracking.mlflow.svc.cluster.local:5000"
+MLFLOW_KB_MODEL = "rca-knowledge-base"
 
-RCA_SERVICE_DEPLOYMENT = os.getenv("RCA_SERVICE_DEPLOYMENT", "trace-rca-service")
-RCA_SERVICE_NAMESPACE = os.getenv("RCA_SERVICE_NAMESPACE", "rca")
+RCA_SERVICE_DEPLOYMENT = "trace-rca-service"
+RCA_SERVICE_NAMESPACE = "rca"
 
 with DAG(
     dag_id='kb_deploy_dag',
@@ -46,5 +46,5 @@ with DAG(
         get_logs=True,
         on_finish_action="delete_pod",
         in_cluster=True,
-        service_account_name="airflow-kb-deployer",
+        service_account_name="mlops-deployer-sa"
     )

@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: system-failure-checker
-          image: asdads6495/myrca-system-failure-checker:1.1.0-ac13d06
+          image: hungtran679/system_failure_checker:latest
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
