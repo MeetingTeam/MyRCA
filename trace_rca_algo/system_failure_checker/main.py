@@ -85,7 +85,7 @@ def send_failure_notification(app_id, abnormal_services, start_dt, end_dt):
         log.error(f"Discord notification failed: {e}")
 
 # ── Core Logic ──────────────────────────────────────────────────────────────
-def check_system_failures(start_dt, end_dt):
+def check_system_failures(start_dt, end_dt, record_timestamp):
     """Query S3 data using the persistent global connection."""
     try:
         # Optimization: Use Hive Partitioning (date_part) to prune S3 files
@@ -93,7 +93,6 @@ def check_system_failures(start_dt, end_dt):
         end_date_str = end_dt.strftime("%Y-%m-%d")
         start_ts_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-        record_timestamp = time.time_ns()
         print(f"Querying spans from {start_ts_str} to {end_ts_str}...")
 
         query = f"""
@@ -159,9 +158,10 @@ def check_system_failures(start_dt, end_dt):
         log.error("Error in check_system_failures: %s", e, exc_info=True)
 
 def check_current_failure():
+    record_timestamp = time.time_ns()
     end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
     start_dt = end_dt - timedelta(minutes=TIME_WINDOW_MINUTES)
-    check_system_failures(start_dt, end_dt)
+    check_system_failures(start_dt, end_dt, record_timestamp)
 
 # ── Lifecycle ───────────────────────────────────────────────────────────────
 @app.on_event("startup")

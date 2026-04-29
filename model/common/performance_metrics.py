@@ -23,7 +23,6 @@ class MetricsTracker:
         self.total_ml_processed_time = 0
         self.total_service_processed_time = 0
         self.total_spans_processed = 0
-        self.total_traces_processed = 0
         self.total_batches = 0
 
         self._lock = threading.Lock()
@@ -55,7 +54,7 @@ class MetricsTracker:
             self.total_batches += 1
 
             log.info(
-                "ML total time: %.2f ns | Service total time: %.2f ns | Total processed spans: %d spans | Current batch processed: %d spans",
+                "ML total time: %.2f ns | Service total time: %.2f ns |Total processed spans: %d spans | Current batch processed: %d spans",
                 self.total_ml_processed_time,
                 self.total_service_processed_time,
                 self.total_spans_processed,

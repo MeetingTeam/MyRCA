@@ -18,7 +18,7 @@ spec:
       containers:
         - name: anomaly-detection-service
           # image: asdads6495/myrca-anomaly-detection:1.1.0-ac13d06
-          image: hungtran679/anomaly-detection-service:dev
+          image: hungtran679/anomaly-detection-service
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

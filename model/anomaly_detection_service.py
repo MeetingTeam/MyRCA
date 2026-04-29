@@ -379,7 +379,7 @@ def main():
                         start_ns = time.perf_counter_ns() 
                         result_df = process_batch(valid_msgs, model, encoders, scalers, device)     
                         ml_batch_processed_time = time.perf_counter_ns() - start_ns
-                        result_df["ml_batch_processed_time"] = ml_batch_processed_time
+                        result_df["ml_batch_processed_time"] = ml_batch_processed_time/len(result_df)
                         
                         if result_df is not None and not result_df.empty:
                             write_buffer.append(result_df)

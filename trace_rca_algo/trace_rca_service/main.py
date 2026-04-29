@@ -249,7 +249,7 @@ def main():
     print(f"Loaded KB with {len(kb)} entries")
     
     # Initialize Loki log extractor (Stage 2)
-    # log_extractor = LokiLogExtractor(LOKI_URL)
+    log_extractor = LokiLogExtractor(LOKI_URL)
 
     # Initialise metrics tracker
     metrics_tracker = MetricsTracker()
@@ -300,8 +300,8 @@ def main():
                 try:
                     top_k_services = [svc for svc, _ in ranking[:5]]
                     from datetime import timedelta
-                    log_start = start_dt - timedelta(minutes=5)
-                    log_end = end_dt + timedelta(minutes=5)
+                    log_start = start_dt - timedelta(minutes=1)
+                    log_end = end_dt + timedelta(minutes=1)
                     logs = log_extractor.query_logs_for_services(
                         top_k_services, log_start, log_end
                     )
