@@ -11,13 +11,17 @@ from configs.constants import UNKNOWN
 from common.util import map_status_group
 
 def preprocess_test_df(test_df, encoders, scalers):
-    # test_df = test_df.sort_values(by="startTime")
+    test_df = test_df.sort_values(by="startTime")
     test_df["raw_service"] = test_df["service"]
     test_df["raw_operation"] = test_df["operation"]
     test_df["http_status"] = test_df["http_status"].astype(int).apply(map_status_group)
-    
+
+    # Default app_id when missing (older datasets without the column)
+    if "app_id" not in test_df.columns:
+        test_df["app_id"] = UNKNOWN
+
     # Encode categorical data (LabelEncoder)
-    for col in ["service", "operation"]:
+    for col in ["service", "operation", "app_id"]:
         encoder = encoders[col]
         test_df[col] = encoder.transform(test_df[col].astype(str))
     
@@ -38,22 +42,24 @@ def preprocess_test_df(test_df, encoders, scalers):
     return test_df
 
 def build_sequences(df, seq_len, metric_cols, stride=1):
-    grouped = df.groupby(["service", "parent_service", "operation", "parent_op", "http_status"], sort=False)
+    # app_id added to groupby so sequences never mix spans across apps
+    grouped = df.groupby(["app_id", "service", "parent_service", "operation", "parent_op", "http_status"], sort=False)
 
-    services, parent_services, operations, parent_ops, statuses = [], [], [], [], []
+    apps, services, parent_services, operations, parent_ops, statuses = [], [], [], [], [], []
     metrics_seq = []
     row_indices = []
 
     metric_cols = list(metric_cols)
 
-    def append_context_features(s, ps, op, pop, h):
+    def append_context_features(a, s, ps, op, pop, h):
+        apps.append(a)
         services.append(s)
         parent_services.append(ps)
         operations.append(op)
         parent_ops.append(pop)
-        statuses.append(h)    
+        statuses.append(h)
 
-    for (s, ps, op, pop, h), g in grouped:
+    for (a, s, ps, op, pop, h), g in grouped:
         metrics = g[metric_cols].to_numpy(dtype=np.float32)
         indices = g.index.to_numpy()
         n = len(g)
@@ -65,23 +71,24 @@ def build_sequences(df, seq_len, metric_cols, stride=1):
             padded_indices = np.full(seq_len, -1, dtype=indices.dtype)
             padded_indices[:n] = indices
 
-            append_context_features(s, ps, op, pop, h)
+            append_context_features(a, s, ps, op, pop, h)
             metrics_seq.append(padded_metrics)
             row_indices.append(padded_indices)
             continue
 
         last_start = n - seq_len
         for i in range(0, last_start + 1, stride):
-            append_context_features(s, ps, op, pop, h)
+            append_context_features(a, s, ps, op, pop, h)
             metrics_seq.append(metrics[i:i + seq_len])
             row_indices.append(indices[i:i + seq_len])
 
         if (last_start % stride) != 0:
-            append_context_features(s, ps, op, pop, h)
+            append_context_features(a, s, ps, op, pop, h)
             metrics_seq.append(metrics[last_start:last_start + seq_len])
             row_indices.append(indices[last_start:last_start + seq_len])
 
     return (
+        np.asarray(apps),
         np.asarray(services),
         np.asarray(parent_services),
         np.asarray(operations),
@@ -104,13 +111,14 @@ def evaluate_model(test_data_path, export_result=True):
     seq_len = 20
     metric_cols = ["duration"]
 
-    services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
-        df, seq_len, metric_cols, stride=2
+    apps, services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
+        df, seq_len, metric_cols, stride=4
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = TensorDataset(
+        torch.LongTensor(apps),
         torch.LongTensor(services),
         torch.LongTensor(parent_services),
         torch.LongTensor(operations),
@@ -126,6 +134,7 @@ def evaluate_model(test_data_path, export_result=True):
         service_vocab=encoders["service"].get_unknown_index() + 1,
         op_vocab=encoders["operation"].get_unknown_index() + 1,
         status_vocab=6,
+        app_vocab=encoders["app_id"].get_unknown_index() + 1,
         metrics_feature_num=len(metric_cols)
     ).to(device)
 
@@ -137,10 +146,10 @@ def evaluate_model(test_data_path, export_result=True):
     span_scores = {}
 
     with torch.no_grad():
-        for s, ps, op, pop, h, x, row_ids in loader:
-            s, ps, op, pop, h, x = s.to(device), ps.to(device), op.to(device), pop.to(device), h.to(device), x.to(device)
+        for a, s, ps, op, pop, h, x, row_ids in loader:
+            a, s, ps, op, pop, h, x = a.to(device), s.to(device), ps.to(device), op.to(device), pop.to(device), h.to(device), x.to(device)
 
-            recon = model(s, ps, op, pop, h, x)
+            recon = model(s, ps, op, pop, h, a, x)
 
             # (B, T, F) → per-timestep score (B, T)
             timestep_loss = criterion(recon, x).sum(dim=2).cpu().numpy()

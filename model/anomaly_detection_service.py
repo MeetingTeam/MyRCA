@@ -1,9 +1,9 @@
 """
-Anomaly Detection Serving API
-─────────────────────────────
-Kafka batch consumer that:
+Anomaly Detection Serving API (Multi-Model)
+────────────────────────────────────────────
+Kafka batch consumer with per-app model routing:
   1. Consumes preprocessed span records from Redpanda topic `preprocess-data`
-  2. Runs Transformer Autoencoder inference to compute anomaly scores
+  2. Routes inference to app-specific models via ModelRegistry
   3. Writes results (Parquet, partitioned by date) to AWS S3 via DuckDB
 """
 
@@ -12,11 +12,11 @@ import os
 import signal
 import logging
 import time
+import threading
 from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-import boto3
 import duckdb
-import joblib
 import numpy as np
 import pandas as pd
 import torch
@@ -24,36 +24,41 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from confluent_kafka import Consumer, KafkaError, KafkaException
 
-from transformer_ae.model import TransformerAutoencoder
+from model_registry import ModelRegistry
 from transformer_ae.evaluate import preprocess_test_df, build_sequences
-from common.util import map_status_group
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
-INPUT_TOPIC = os.getenv("INPUT_TOPIC", "traces")
+INPUT_TOPIC = os.getenv("INPUT_TOPIC", "preprocess-data")
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "anomaly-group")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
-ANOMALY_THRESHOLD = float(os.getenv("ANOMALY_THRESHOLD", "0.3293778896331787"))
 
-# Write buffer settings: flush when row count OR time threshold is reached
+# Multi-model config
+MAX_CACHED_MODELS = int(os.getenv("MAX_CACHED_MODELS", "10"))
+DEFAULT_APP_ID = os.getenv("DEFAULT_APP_ID", "k8s-repo-application")
+DEFAULT_THRESHOLD = float(os.getenv("ANOMALY_THRESHOLD", "0.33"))
+
+# Write buffer settings
 FLUSH_ROW_THRESHOLD = int(os.getenv("FLUSH_ROW_THRESHOLD", "500"))
 FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "60"))
 
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
+# S3 config
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
-S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+
+# Health server
+HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8080"))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("anomaly-detection")
-# Persistent global DuckDB connection
-db_con = duckdb.connect(database=':memory:') 
+
+db_con = duckdb.connect(database=':memory:')
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 
@@ -67,64 +72,54 @@ def _stop(signum, _frame):
 signal.signal(signal.SIGINT, _stop)
 signal.signal(signal.SIGTERM, _stop)
 
-# ── Model loading (one-time) ─────────────────────────────────────────────────
+# ── Global model registry ─────────────────────────────────────────────────────
 
-def _download_s3_model(model_s3_path: str, local_dir: str):
-    """Download model artifacts from S3 to a local directory."""
-    s3_client = boto3.client("s3", region_name=S3_REGION)
-    # Parse bucket and prefix from s3://bucket/prefix/
-    parts = model_s3_path.replace("s3://", "").split("/", 1)
-    bucket = parts[0]
-    prefix = parts[1].rstrip("/")
+model_registry: ModelRegistry = None
 
-    os.makedirs(local_dir, exist_ok=True)
-    for filename in ["model.pth", "encoders.pkl", "scalers.pkl"]:
-        key = f"{prefix}/{filename}"
-        local_path = os.path.join(local_dir, filename)
-        log.info("Downloading s3://%s/%s → %s", bucket, key, local_path)
-        s3_client.download_file(bucket, key, local_path)
+def init_model_registry():
+    """Initialize the global model registry."""
+    global model_registry
+    local_fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transformer_ae")
 
+    model_registry = ModelRegistry(
+        s3_bucket=S3_BUCKET,
+        s3_region=S3_REGION,
+        max_models=MAX_CACHED_MODELS,
+        default_app_id=DEFAULT_APP_ID,
+        local_fallback_dir=local_fallback,
+    )
+    log.info("Model registry initialized (max_models=%d, default=%s)", MAX_CACHED_MODELS, DEFAULT_APP_ID)
 
-def load_model():
-    """Load the Transformer Autoencoder model, encoders, and scalers.
+# ── Health server ─────────────────────────────────────────────────────────────
 
-    If MODEL_S3_PATH is set, downloads artifacts from S3.
-    Otherwise, falls back to local filesystem loading (backward compatible).
-    """
-    model_s3_path = os.getenv("MODEL_S3_PATH", "")
-    model_version = os.getenv("MODEL_VERSION", "")
+class HealthHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
 
-    if model_s3_path:
-        log.info("Loading model from S3: %s (version=%s)", model_s3_path, model_version)
-        local_dir = "/tmp/model"
-        _download_s3_model(model_s3_path, local_dir)
-        model_path = os.path.join(local_dir, "model.pth")
-        encoders = joblib.load(os.path.join(local_dir, "encoders.pkl"))
-        scalers = joblib.load(os.path.join(local_dir, "scalers.pkl"))
-    else:
-        log.info("Loading model from local filesystem (no MODEL_S3_PATH set)")
-        BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transformer_ae")
-        model_path = os.path.join(BASE_DIR, "transformer_ae_model.pth")
-        encoders = joblib.load(os.path.join(BASE_DIR, "transformer_ae_encoders.pkl"))
-        scalers = joblib.load(os.path.join(BASE_DIR, "transformer_ae_scalers.pkl"))
+    def do_GET(self):
+        if self.path == "/health" or self.path == "/healthz":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        elif self.path == "/cache-stats":
+            stats = model_registry.get_cache_stats() if model_registry else {}
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(stats).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = TransformerAutoencoder(
-        service_vocab=encoders["service"].get_unknown_index() + 1,
-        op_vocab=encoders["operation"].get_unknown_index() + 1,
-        status_vocab=6,
-        metrics_feature_num=1,  # duration only
-    ).to(device)
-
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-
-    source = f"S3 ({model_version})" if model_s3_path else "local"
-    log.info("Model loaded from %s on device=%s", source, device)
-    return model, encoders, scalers, device
+def start_health_server(port: int):
+    server = HTTPServer(("", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info("Health server started on port %d", port)
 
 # ── DuckDB ───────────────────────────────────────────────────────
+
 def init_duckdb_s3():
     """Initialize S3 credentials and extensions once."""
     log.info("Initializing DuckDB S3 Connection...")
@@ -139,11 +134,7 @@ def init_duckdb_s3():
     """)
 
 def write_to_s3(result_df: pd.DataFrame):
-    """Write the result DataFrame to S3 as a uniquely-named Parquet file per flush.
-
-    Uses a fresh DuckDB connection + APPEND mode for each write to avoid
-    stale connection state issues with S3 endpoint resolution.
-    """
+    """Write the result DataFrame to S3 as Parquet."""
     if result_df.empty:
         return
 
@@ -185,60 +176,32 @@ def write_to_s3(result_df: pd.DataFrame):
     finally:
         write_con.close()
 
-# ── Batch processing pipeline ────────────────────────────────────────────────
+# ── Per-app batch processing ──────────────────────────────────────────────────
 
-def process_batch(messages: list, model, encoders, scalers, device):
-    """
-    Process a batch of Kafka messages:
-      1. Parse JSON → DataFrame
-      2. Preprocess (encode + scale)
-      3. Build sequences (groups of 20 spans)
-      4. Model inference → anomaly scores
-      5. Threshold comparison
-      6. Write to S3
-    """
-    # 1. Parse messages into records
-    records = []
-    for msg in messages:
-        try:
-            record = json.loads(msg.value())
-            records.append(record)
-        except (json.JSONDecodeError, TypeError) as e:
-            log.warning("Skipping malformed message: %s", e)
+def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Process batch for a single app_id using its specific model."""
+    app_model = model_registry.get_model(app_id)
+    if app_model is None:
+        log.warning("No model available for app_id=%s, skipping %d records", app_id, len(df))
+        return pd.DataFrame()
 
-    if not records:
-        return 0
+    log.debug("Processing %d records for app_id=%s with model version=%s",
+              len(df), app_id, app_model.version)
 
-    df = pd.DataFrame(records)
+    df = preprocess_test_df(df.copy(), app_model.encoders, app_model.scalers)
 
-    # Validate required columns
-    required_cols = ["app_id", "service", "operation", "http_status", "duration",
-                     "spanId", "parentSpanId", "traceId", "startTime", "span_status", "kind"]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        log.error("Missing required columns: %s — skipping batch", missing)
-        return 0
-
-    # Save raw duration before preprocessing scales it
-    df["duration_raw"] = df["duration"]
-
-    # 2. Preprocess
-    df = preprocess_test_df(df, encoders, scalers)
-
-    # 3. Build sequences
     seq_len = 20
     metric_cols = ["duration"]
-
-    services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
+    apps, services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
         df, seq_len, metric_cols, stride=1
     )
 
     if len(services) == 0:
-        log.info("No sequences built from %d records (groups too small)", len(df))
-        return 0
+        log.debug("No sequences built from %d records for app_id=%s", len(df), app_id)
+        return pd.DataFrame()
 
-    # 4. Model inference
     dataset = TensorDataset(
+        torch.LongTensor(apps),
         torch.LongTensor(services),
         torch.LongTensor(parent_services),
         torch.LongTensor(operations),
@@ -253,18 +216,17 @@ def process_batch(messages: list, model, encoders, scalers, device):
     df["anomaly_score"] = np.nan
 
     with torch.no_grad():
-        for s, ps, op, pop, h, x, row_ids in loader:
-            s = s.to(device)
-            ps = ps.to(device)
-            op = op.to(device)
-            pop = pop.to(device)
-            h = h.to(device)
-            x = x.to(device)
+        for a, s, ps, op, pop, h, x, row_ids in loader:
+            a = a.to(app_model.device)
+            s = s.to(app_model.device)
+            ps = ps.to(app_model.device)
+            op = op.to(app_model.device)
+            pop = pop.to(app_model.device)
+            h = h.to(app_model.device)
+            x = x.to(app_model.device)
 
-            recon = model(s, ps, op, pop, h, x)
-
-            # (B, T, F) → per-batch score (B,)
-            timestep_loss = criterion(recon, x).mean(dim=(1, 2)).cpu().numpy()
+            recon = app_model.model(s, ps, op, pop, h, a, x)
+            timestep_loss = criterion(recon, x).mean(dim=2).cpu().numpy()
             row_ids_np = row_ids.numpy()
 
             for b in range(len(row_ids_np)):
@@ -276,7 +238,6 @@ def process_batch(messages: list, model, encoders, scalers, device):
 
                     score = float(timestep_loss[b, t_idx])
 
-                    # Boost score for server errors / OTel error status
                     if df.at[row, "span_status"] == 2 or df.at[row, "http_status"] == 5:
                         score += 1000
 
@@ -285,28 +246,68 @@ def process_batch(messages: list, model, encoders, scalers, device):
                     else:
                         df.at[row, "anomaly_score"] = max(df.at[row, "anomaly_score"], score)
 
-    # 5. Threshold comparison
-    df["is_anomaly"] = df["anomaly_score"] > ANOMALY_THRESHOLD
+    df["is_anomaly"] = df["anomaly_score"] > app_model.threshold
 
-    # Drop rows without a score (weren't part of any sequence)
     result_df = df.dropna(subset=["anomaly_score"]).copy()
-
     if result_df.empty:
-        log.info("No scored spans in this batch")
-        return 0
+        return pd.DataFrame()
 
     anomaly_count = result_df["is_anomaly"].sum()
-    log.info(
-        "Batch processed: %d records → %d scored → %d anomalies",
-        len(records), len(result_df), anomaly_count,
-    )
+    log.info("app_id=%s: %d records → %d scored → %d anomalies (threshold=%.4f)",
+             app_id, len(df), len(result_df), anomaly_count, app_model.threshold)
+
     return result_df
 
+# ── Batch processing pipeline (multi-model) ──────────────────────────────────
+
+def process_batch(messages: list) -> pd.DataFrame:
+    """
+    Process batch with per-app model routing:
+      1. Parse JSON → DataFrame
+      2. Group by app_id
+      3. For each app_id: get model, preprocess, infer
+      4. Merge results
+    """
+    records = []
+    for msg in messages:
+        try:
+            record = json.loads(msg.value())
+            records.append(record)
+        except (json.JSONDecodeError, TypeError) as e:
+            log.warning("Skipping malformed message: %s", e)
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+
+    required_cols = ["app_id", "service", "operation", "http_status", "duration",
+                     "spanId", "parentSpanId", "traceId", "startTime", "span_status", "kind"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        log.error("Missing required columns: %s — skipping batch", missing)
+        return pd.DataFrame()
+
+    df["duration_raw"] = df["duration"]
+
+    result_dfs = []
+    for app_id, app_df in df.groupby("app_id"):
+        try:
+            app_result = process_app_batch(app_id, app_df)
+            if app_result is not None and not app_result.empty:
+                result_dfs.append(app_result)
+        except Exception as e:
+            log.error("Error processing app_id=%s: %s", app_id, e, exc_info=True)
+
+    if not result_dfs:
+        return pd.DataFrame()
+
+    return pd.concat(result_dfs, ignore_index=True)
 
 # ── Main consumer loop ───────────────────────────────────────────────────────
 
 def flush_buffer(buffer: list[pd.DataFrame]) -> int:
-    """Concatenate buffered DataFrames and write to S3. Returns row count written."""
+    """Concatenate buffered DataFrames and write to S3."""
     if not buffer:
         return 0
     combined = pd.concat(buffer, ignore_index=True)
@@ -315,12 +316,11 @@ def flush_buffer(buffer: list[pd.DataFrame]) -> int:
 
 
 def main():
-    log.info("Anomaly Detection Service starting…")
+    log.info("Anomaly Detection Service (Multi-Model) starting…")
 
-    # Load model once
-    model, encoders, scalers, device = load_model()
+    init_model_registry()
+    start_health_server(HEALTH_PORT)
 
-    # Kafka consumer
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
         "group.id": CONSUMER_GROUP,
@@ -333,7 +333,6 @@ def main():
         INPUT_TOPIC, CONSUMER_GROUP, BATCH_SIZE, FLUSH_ROW_THRESHOLD, FLUSH_INTERVAL_SECONDS,
     )
 
-    # Initialize DuckDB S3 connection
     init_duckdb_s3()
 
     total_processed = 0
@@ -343,11 +342,9 @@ def main():
 
     try:
         while running:
-            # Batch consume
             messages = consumer.consume(num_messages=BATCH_SIZE, timeout=5.0)
 
             if messages:
-                # Filter out errors
                 valid_msgs = []
                 for msg in messages:
                     if msg.error():
@@ -360,14 +357,13 @@ def main():
                 if valid_msgs:
                     log.info("Received %d messages, processing…", len(valid_msgs))
                     try:
-                        result_df = process_batch(valid_msgs, model, encoders, scalers, device)
+                        result_df = process_batch(valid_msgs)
                         if result_df is not None and not result_df.empty:
                             write_buffer.append(result_df)
                             buffer_rows += len(result_df)
                     except Exception as e:
                         log.error("Error processing batch: %s", e, exc_info=True)
 
-            # Flush buffer if row threshold or time interval is reached
             should_flush = (
                 buffer_rows >= FLUSH_ROW_THRESHOLD
                 or (write_buffer and time.time() - last_flush_time >= FLUSH_INTERVAL_SECONDS)
@@ -387,7 +383,6 @@ def main():
     except KafkaException as e:
         log.error("Kafka exception: %s", e)
     finally:
-        # Flush remaining buffer on shutdown
         if write_buffer:
             try:
                 flushed = flush_buffer(write_buffer)
@@ -397,6 +392,7 @@ def main():
                 log.error("Error in final flush: %s", e, exc_info=True)
         consumer.close()
         db_con.close()
+        log.info("Cache stats at shutdown: %s", model_registry.get_cache_stats())
         log.info("Shutdown complete. total_processed=%d", total_processed)
 
 
