@@ -45,3 +45,11 @@ class MetricsTracker:
                 self.total_run,
                 self.total_spans_processed
             )
+
+    def reset_metrics(self):
+        with self._lock:
+            self.total_rca_processed_time = 0
+            self.total_service_processed_time = 0
+            self.total_spans_processed = 0
+            self.total_run = 0
+            log.info("Metrics reset to zero")

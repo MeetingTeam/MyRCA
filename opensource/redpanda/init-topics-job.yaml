@@ -27,18 +27,28 @@ spec:
 
               rpk topic create traces \
                 --brokers redpanda.redpanda.svc.cluster.local:9093 \
-                --partitions 3 --replicas 1 \
+                --partitions 6 --replicas 1 \
                 --topic-config retention.ms=259200000 \
+                --topic-config retention.bytes=2147483648 \
                 --topic-config compression.type=snappy \
                 || echo "Topic 'traces' already exists"
 
               rpk topic create preprocess-data \
                 --brokers redpanda.redpanda.svc.cluster.local:9093 \
-                --partitions 3 --replicas 1 \
+                --partitions 6 --replicas 1 \
                 --topic-config retention.ms=259200000 \
+                --topic-config retention.bytes=2147483648 \
                 --topic-config compression.type=snappy \
                 || echo "Topic 'preprocess-data' already exists"
 
+              rpk topic create rca-task-data \
+                --brokers redpanda.redpanda.svc.cluster.local:9093 \
+                --partitions 6 --replicas 1 \
+                --topic-config retention.ms=259200000 \
+                --topic-config retention.bytes=2147483648 \
+                --topic-config compression.type=snappy \
+                || echo "Topic 'rca-task-data' already exists"
+              
               echo "📋 Current topics:"
               rpk topic list --brokers redpanda.redpanda.svc.cluster.local:9093
 

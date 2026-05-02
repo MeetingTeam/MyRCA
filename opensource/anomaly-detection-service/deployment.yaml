@@ -6,7 +6,7 @@ metadata:
   labels:
     app: anomaly-detection-service
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: anomaly-detection-service

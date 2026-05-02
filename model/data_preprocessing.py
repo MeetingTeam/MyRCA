@@ -51,9 +51,8 @@ def get_service_instance_id(resource):
 
 
 def get_app_id(resource):
-    """Extract app_id from resource attributes. Returns None if not found."""
-    app_id = get_resource_attribute(resource, "app_id")
-    return app_id if app_id != UNKNOWN else None
+    """Extract app_id from resource attributes."""
+    return get_resource_attribute(resource, "app_id")
 
 
 def get_span_attributes(span):
@@ -115,7 +114,8 @@ def extract_records(otlp_json: dict) -> list[dict]:
             lib = scope_span.get("scope", {}).get("name", "")
 
             for raw_span in scope_span.get("spans", []):
-                if not filter_span(lib, raw_span):
+                # Temporarily skip filter for app 2
+                if app_id == "k8s-repo-application" and not filter_span(lib, raw_span):
                     continue
 
                 operation = normalize_operation(raw_span.get("name", UNKNOWN))
@@ -143,8 +143,8 @@ def extract_records(otlp_json: dict) -> list[dict]:
 
 
 def build_partition_key(record: dict) -> str:
-    """Build partition key: <app_id>/<service>/<operation>/<http_status>"""
-    return f"{record['app_id']}/{record['service']}/{record['operation']}/{record['http_status']}"
+    """Build partition key: <app_id>/<service>/<operation>/<service_instance_id>"""
+    return f"{record['app_id']}/{record['service']}/{record['operation']}/{record['service_instance_id']}"
 
 # ── Kafka producer callback ──────────────────────────────────────────────────
 

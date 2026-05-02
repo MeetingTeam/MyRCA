@@ -61,6 +61,19 @@ def init_duckdb_s3():
             URL_STYLE 'path'
         );
     """)
+    db_con.execute("SET threads TO 8;")
+
+    # Run a warm-up query
+    run_warmup_query()
+
+def run_warmup_query():
+    # Use UTC-aware timestamps to match most telemetry pipelines
+
+    warm_start = datetime.fromisoformat("2026-04-30T16:07:15.518782")
+    warm_end = datetime.fromisoformat("2026-04-30T16:10:15.518782")
+
+    # Warm-up query: similar shape to main query, but bounded + lightweight
+    query_spans_by_timestamp(warm_start, warm_end, app_id="k8s-repo-application")
 
 def fetch_s3_json(s3_path):
     """
@@ -133,15 +146,23 @@ def query_spans_by_timestamp(start_dt, end_dt, app_id: str = None):
         query = f"""
             WITH anomalous_traces AS (
                 SELECT DISTINCT trace_id
-                FROM 's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet'
+                FROM read_parquet(
+                    's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet',
+                    hive_partitioning = true
+                )
                 WHERE date_part BETWEEN ? AND ?
-                AND is_anomaly = True
                 AND "timestamp" BETWEEN ? AND ?
+                AND is_anomaly = TRUE
                 {app_filter}
             )
-            SELECT * FROM 's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet'
-            WHERE date_part BETWEEN ? AND ?
-            AND trace_id IN (SELECT trace_id FROM anomalous_traces)
+            SELECT s.*
+            FROM read_parquet(
+                's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet',
+                hive_partitioning = true
+            ) s
+            JOIN anomalous_traces a
+            ON s.trace_id = a.trace_id
+            WHERE s.date_part BETWEEN ? AND ?
             {app_filter}
         """
 
@@ -160,19 +181,9 @@ def query_spans_by_timestamp(start_dt, end_dt, app_id: str = None):
 
         # Retry on transient read errors (race condition: anomaly-detection
         # service may be overwriting the parquet file on S3 mid-read).
-        max_retries = 6
-        for attempt in range(max_retries):
-            try:
-                result_df = db_con.cursor().execute(query, params).fetchdf()
-                log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
-                return result_df
-            except (UnicodeDecodeError, duckdb.IOException) as read_err:
-                if attempt < max_retries - 1:
-                    log.warning("Transient S3 read error (attempt %d/%d): %s", attempt + 1, max_retries, read_err)
-                    time.sleep(1)
-                else:
-                    log.warning("S3 read failed after %d attempts, skipping", max_retries)
-                    return None
+        result_df = db_con.cursor().execute(query, params).fetchdf()
+        log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
+        return result_df
 
     except Exception as e:
         log.error(f"Error querying spans: {e}")
@@ -270,6 +281,10 @@ def main():
                     continue
 
                 record = json.loads(msg.value().decode("utf-8"))
+                if "type" in record and record["type"] == "reset":
+                    log.info("Received metrics reset command")
+                    metrics_tracker.reset_metrics()
+                    continue
                 if not "start_dt" in record or not "end_dt" in record or not "record_timestamp" in record:
                     log.error("Missing start_dt or end_dt or record_timestamp in record")
                     continue
@@ -281,7 +296,10 @@ def main():
                 log.info(f"Processing RCA task: app={app_id}, {start_dt} to {end_dt}")
 
                 # Query spans from S3 (filter by app_id if provided)
+                start_ns = time.perf_counter_ns()
                 spans_df = query_spans_by_timestamp(start_dt, end_dt, app_id)
+                end_ns = time.perf_counter_ns()
+                log.info(f"Queried spans in {(end_ns - start_ns) / 1e9:.2f} seconds")
 
                 if spans_df is None or spans_df.empty:
                     log.warning("No spans found for the given time range")
@@ -298,10 +316,10 @@ def main():
                 llm_result = None
                 logs = {}
                 try:
-                    top_k_services = [svc for svc, _ in ranking[:5]]
+                    top_k_services = [svc for svc, _ in ranking[:3]]
                     from datetime import timedelta
-                    log_start = start_dt - timedelta(minutes=1)
-                    log_end = end_dt + timedelta(minutes=1)
+                    log_start = start_dt - timedelta(minutes=0.25)
+                    log_end = end_dt
                     logs = log_extractor.query_logs_for_services(
                         top_k_services, log_start, log_end
                     )
