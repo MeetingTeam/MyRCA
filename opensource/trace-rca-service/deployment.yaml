@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: trace-rca-service
-          image: asdads6495/myrca-trace-rca-service:1.1.0-ac099c7
+          image: hungtran679/trace_rca_service:test
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -26,9 +26,9 @@ spec:
                 name: trace-rca-service-secret
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
               cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
               memory: 512Mi
       restartPolicy: Always

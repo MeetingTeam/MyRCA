@@ -13,8 +13,8 @@ tempo:
       cpu: 250m
       memory: 512Mi
     limits:
-      cpu: 1000m
-      memory: 2Gi
+      cpu: 250m
+      memory: 512Mi
   
   # OTLP receivers - receives traces from AI Anomaly Detection Model
   # AI Model forwards ALL traces (normal + anomaly) via OTLP/gRPC

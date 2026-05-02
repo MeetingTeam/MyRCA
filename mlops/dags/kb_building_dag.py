@@ -5,14 +5,14 @@ from airflow.utils.dates import days_ago
 from datetime import datetime
 from kubernetes.client import models as k8s
 
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
-S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
-S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
+S3_ENDPOINT = "s3.amazonaws.com"
+S3_REGION = "ap-southeast-1"
+S3_BUCKET = "kltn-anomaly-dateset-1"
+S3_USE_SSL = "true"
 
-KB_BUILDER_IMAGE = os.getenv("KB_BUILDER_IMAGE", "hungtran679/kb_builder:dev")
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
-MLFLOW_KB_MODEL = os.getenv("MLFLOW_KB_MODEL", "rca-knowledge-base")
+KB_BUILDER_IMAGE = "hungtran679/kb_builder"
+MLFLOW_TRACKING_URI = "http://mlflow-tracking.mlflow.svc.cluster.local:5000"
+MLFLOW_KB_MODEL = "rca-knowledge-base"
 
 # --- DAG Definition ---
 with DAG(
@@ -40,10 +40,11 @@ with DAG(
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="airflow-aws-secret")),
         ],
         container_resources=k8s.V1ResourceRequirements(
-            requests={"cpu": "500m", "memory": "1Gi"},
+            requests={"cpu": "200m", "memory": "512Mi"},
             limits={"cpu": "500m", "memory": "1Gi"}
         ),
         get_logs=True,
         on_finish_action="keep_pod",
         in_cluster=True,
+        startup_timeout_seconds=900
     )

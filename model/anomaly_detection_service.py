@@ -27,6 +27,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException
 from transformer_ae.model import TransformerAutoencoder
 from transformer_ae.evaluate import preprocess_test_df, build_sequences
 from common.util import map_status_group
+from common.performance_metrics import MetricsTracker
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -54,6 +55,8 @@ logging.basicConfig(
 log = logging.getLogger("anomaly-detection")
 # Persistent global DuckDB connection
 db_con = duckdb.connect(database=':memory:') 
+# Initialise metrics tracker
+metrics_tracker = MetricsTracker()
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 
@@ -149,6 +152,18 @@ def write_to_s3(result_df: pd.DataFrame):
 
     write_con = duckdb.connect(database=":memory:")
     try:
+        # Debug: print a few app_id values before DuckDB write
+        if "app_id" in result_df.columns:
+            sample_app_ids = result_df["app_id"].head(10).tolist()
+            log.info("Sample app_id values (first 10): %s", sample_app_ids)
+
+            # Optional: also inspect null / empty cases
+            null_count = result_df["app_id"].isna().sum()
+            empty_count = (result_df["app_id"].astype(str).str.strip() == "").sum()
+            log.info("app_id null_count=%d, empty_count=%d", null_count, empty_count)
+        else:
+            log.error("app_id column missing before S3 write")
+        
         write_con.execute("INSTALL httpfs; LOAD httpfs;")
         write_con.execute(f"""
             CREATE OR REPLACE SECRET (
@@ -207,7 +222,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
             log.warning("Skipping malformed message: %s", e)
 
     if not records:
-        return 0
+        return None
 
     df = pd.DataFrame(records)
 
@@ -217,7 +232,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         log.error("Missing required columns: %s — skipping batch", missing)
-        return 0
+        return None
 
     # Save raw duration before preprocessing scales it
     df["duration_raw"] = df["duration"]
@@ -235,7 +250,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
 
     if len(services) == 0:
         log.info("No sequences built from %d records (groups too small)", len(df))
-        return 0
+        return None
 
     # 4. Model inference
     dataset = TensorDataset(
@@ -264,7 +279,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
             recon = model(s, ps, op, pop, h, x)
 
             # (B, T, F) → per-batch score (B,)
-            timestep_loss = criterion(recon, x).mean(dim=(1, 2)).cpu().numpy()
+            timestep_loss = criterion(recon, x).sum(dim=2).cpu().numpy()
             row_ids_np = row_ids.numpy()
 
             for b in range(len(row_ids_np)):
@@ -293,7 +308,7 @@ def process_batch(messages: list, model, encoders, scalers, device):
 
     if result_df.empty:
         log.info("No scored spans in this batch")
-        return 0
+        return None
 
     anomaly_count = result_df["is_anomaly"].sum()
     log.info(
@@ -360,7 +375,12 @@ def main():
                 if valid_msgs:
                     log.info("Received %d messages, processing…", len(valid_msgs))
                     try:
-                        result_df = process_batch(valid_msgs, model, encoders, scalers, device)
+                        # Start timer (high precision)
+                        start_ns = time.perf_counter_ns() 
+                        result_df = process_batch(valid_msgs, model, encoders, scalers, device)     
+                        ml_batch_processed_time = time.perf_counter_ns() - start_ns
+                        result_df["ml_batch_processed_time"] = ml_batch_processed_time/len(result_df)
+                        
                         if result_df is not None and not result_df.empty:
                             write_buffer.append(result_df)
                             buffer_rows += len(result_df)
@@ -378,12 +398,12 @@ def main():
                     flushed = flush_buffer(write_buffer)
                     total_processed += flushed
                     log.info("Flushed %d buffered records to S3", flushed)
+                    metrics_tracker.calculate_performance_metrics(write_buffer)
                 except Exception as e:
                     log.error("Error flushing buffer to S3: %s", e, exc_info=True)
                 write_buffer.clear()
                 buffer_rows = 0
                 last_flush_time = time.time()
-
     except KafkaException as e:
         log.error("Kafka exception: %s", e)
     finally:
@@ -393,6 +413,7 @@ def main():
                 flushed = flush_buffer(write_buffer)
                 total_processed += flushed
                 log.info("Final flush: %d records to S3", flushed)
+                metrics_tracker.calculate_performance_metrics(write_buffer)
             except Exception as e:
                 log.error("Error in final flush: %s", e, exc_info=True)
         consumer.close()

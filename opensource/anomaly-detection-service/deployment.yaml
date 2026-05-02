@@ -6,7 +6,7 @@ metadata:
   labels:
     app: anomaly-detection-service
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: anomaly-detection-service
@@ -17,7 +17,8 @@ spec:
     spec:
       containers:
         - name: anomaly-detection-service
-          image: asdads6495/myrca-anomaly-detection:1.1.0-ac13d06
+          # image: asdads6495/myrca-anomaly-detection:1.1.0-ac13d06
+          image: hungtran679/anomaly-detection-service
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

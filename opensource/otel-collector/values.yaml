@@ -14,14 +14,20 @@ ingestor:
 
   otel_config:
     processors:
+      transform/set_nginx_app_id:
+        error_mode: ignore
+        trace_statements:
+          - context: resource
+            statements:
+              - set(attributes["app_id"], "k8s-repo-application") where attributes["service.name"] == "nginx-proxy"
       filter/drop_no_app_id:
         error_mode: ignore
         traces:
           span:
             - 'resource.attributes["app_id"] == nil'
       batch:
-        timeout: 3s
-        send_batch_size: 8
+        timeout: 1s
+        send_batch_size: 10
 
     exporters:
       otlp:
@@ -39,6 +45,18 @@ ingestor:
         tls:
           insecure: true
 
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [transform/set_nginx_app_id, filter/drop_no_app_id, batch]
+          exporters: [otlp, kafka]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlphttp/loki]
+
   deployment:
     podAnnotations: {}
     podLabels: {}
@@ -49,7 +67,7 @@ ingestor:
       runAsGroup: 1000
       fsGroup: 1000
 
-    replicaCount: 1
+    replicaCount: 2
 
     env: []
 

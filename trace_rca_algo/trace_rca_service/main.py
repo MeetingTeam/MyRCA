@@ -16,6 +16,7 @@ import requests
 import logging
 import boto3
 from urllib.parse import urlparse
+from performance_metrics import MetricsTracker
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -60,6 +61,19 @@ def init_duckdb_s3():
             URL_STYLE 'path'
         );
     """)
+    db_con.execute("SET threads TO 8;")
+
+    # Run a warm-up query
+    run_warmup_query()
+
+def run_warmup_query():
+    # Use UTC-aware timestamps to match most telemetry pipelines
+
+    warm_start = datetime.fromisoformat("2026-04-30T16:07:15.518782")
+    warm_end = datetime.fromisoformat("2026-04-30T16:10:15.518782")
+
+    # Warm-up query: similar shape to main query, but bounded + lightweight
+    query_spans_by_timestamp(warm_start, warm_end, app_id="k8s-repo-application")
 
 def fetch_s3_json(s3_path):
     """
@@ -84,39 +98,39 @@ def fetch_s3_json(s3_path):
         
     return json.loads(content)
 
-def fetch_kb_from_mlflow(model_name):
-    """
-    Fetches the Knowledge Base from MLflow using the production alias.
-    Falls back to S3_KB_PATH if MLflow is unavailable.
-    """
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    client = MlflowClient()
+# def fetch_kb_from_mlflow(model_name):
+#     """
+#     Fetches the Knowledge Base from MLflow using the production alias.
+#     Falls back to S3_KB_PATH if MLflow is unavailable.
+#     """
+#     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+#     client = MlflowClient()
 
-    try:
-        model_version = client.get_model_version_by_alias(
-            name=model_name,
-            alias="production"
-        )
-        run_id = model_version.run_id
-        log.info(f"Found production KB model version {model_version.version} from run {run_id}")
+#     try:
+#         model_version = client.get_model_version_by_alias(
+#             name=model_name,
+#             alias="production"
+#         )
+#         run_id = model_version.run_id
+#         log.info(f"Found production KB model version {model_version.version} from run {run_id}")
         
-        # Download the KB artifact from the run
-        # The artifact is stored at kb_model/artifacts/kb_json
-        kb_file = client.download_artifacts(run_id, "kb_model/artifacts/built_kb.json", dst_path="./mlflow_artifacts")
+#         # Download the KB artifact from the run
+#         # The artifact is stored at kb_model/artifacts/kb_json
+#         kb_file = client.download_artifacts(run_id, "kb_model/artifacts/built_kb.json", dst_path="./mlflow_artifacts")
         
-        # Load the KB JSON
-        with open(kb_file, "r") as f:
-            kb = json.load(f)
+#         # Load the KB JSON
+#         with open(kb_file, "r") as f:
+#             kb = json.load(f)
 
-        log.info(f"Successfully loaded KB from MLflow (version {model_version.version})")
-        return kb
+#         log.info(f"Successfully loaded KB from MLflow (version {model_version.version})")
+#         return kb
 
-    except Exception as e:
-        log.warning(f"MLflow KB fetch failed: {e}")
-        if S3_KB_PATH:
-            log.info("Falling back to S3 KB path...")
-            return fetch_kb_from_s3(S3_KB_PATH)
-        raise
+#     except Exception as e:
+#         log.warning(f"MLflow KB fetch failed: {e}")
+#         if S3_KB_PATH:
+#             log.info("Falling back to S3 KB path...")
+#             return fetch_kb_from_s3(S3_KB_PATH)
+#         raise
 
 def query_spans_by_timestamp(start_dt, end_dt, app_id: str = None):
     """
@@ -132,15 +146,23 @@ def query_spans_by_timestamp(start_dt, end_dt, app_id: str = None):
         query = f"""
             WITH anomalous_traces AS (
                 SELECT DISTINCT trace_id
-                FROM 's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet'
+                FROM read_parquet(
+                    's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet',
+                    hive_partitioning = true
+                )
                 WHERE date_part BETWEEN ? AND ?
-                AND is_anomaly = True
                 AND "timestamp" BETWEEN ? AND ?
+                AND is_anomaly = TRUE
                 {app_filter}
             )
-            SELECT * FROM 's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet'
-            WHERE date_part BETWEEN ? AND ?
-            AND trace_id IN (SELECT trace_id FROM anomalous_traces)
+            SELECT s.*
+            FROM read_parquet(
+                's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet',
+                hive_partitioning = true
+            ) s
+            JOIN anomalous_traces a
+            ON s.trace_id = a.trace_id
+            WHERE s.date_part BETWEEN ? AND ?
             {app_filter}
         """
 
@@ -159,26 +181,16 @@ def query_spans_by_timestamp(start_dt, end_dt, app_id: str = None):
 
         # Retry on transient read errors (race condition: anomaly-detection
         # service may be overwriting the parquet file on S3 mid-read).
-        max_retries = 6
-        for attempt in range(max_retries):
-            try:
-                result_df = db_con.cursor().execute(query, params).fetchdf()
-                log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
-                return result_df
-            except (UnicodeDecodeError, duckdb.IOException) as read_err:
-                if attempt < max_retries - 1:
-                    log.warning("Transient S3 read error (attempt %d/%d): %s", attempt + 1, max_retries, read_err)
-                    time.sleep(1)
-                else:
-                    log.warning("S3 read failed after %d attempts, skipping", max_retries)
-                    return None
+        result_df = db_con.cursor().execute(query, params).fetchdf()
+        log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
+        return result_df
 
     except Exception as e:
         log.error(f"Error querying spans: {e}")
         return None
 
 def send_rca_notification(
-    ranking, start_dt: datetime, end_dt: datetime, llm_result: dict | None = None
+    app_id, ranking, start_dt: datetime, end_dt: datetime, llm_result: dict | None = None
 ):
     """Post the RCA ranking results to a Discord channel via webhook."""
     if not DISCORD_WEBHOOK_URL:
@@ -196,6 +208,7 @@ def send_rca_notification(
 
     message = f"""🚨 **System Failure Detected**
 **Time Window:** {discord_time}
+**App ID:** {app_id}
 
 **Stage 1 — Structural Ranking:**
 {rank_text}"""
@@ -249,6 +262,9 @@ def main():
     # Initialize Loki log extractor (Stage 2)
     log_extractor = LokiLogExtractor(LOKI_URL)
 
+    # Initialise metrics tracker
+    metrics_tracker = MetricsTracker()
+
     # ── Start REST API server in background thread ────────────────
     api_module.set_db_con(db_con)
     threading.Thread(
@@ -265,8 +281,12 @@ def main():
                     continue
 
                 record = json.loads(msg.value().decode("utf-8"))
-                if not "start_dt" in record or not "end_dt" in record:
-                    log.error("Missing start_dt or end_dt in record")
+                if "type" in record and record["type"] == "reset":
+                    log.info("Received metrics reset command")
+                    metrics_tracker.reset_metrics()
+                    continue
+                if not "start_dt" in record or not "end_dt" in record or not "record_timestamp" in record:
+                    log.error("Missing start_dt or end_dt or record_timestamp in record")
                     continue
 
                 # Convert timestamps to datetime objects
@@ -276,24 +296,30 @@ def main():
                 log.info(f"Processing RCA task: app={app_id}, {start_dt} to {end_dt}")
 
                 # Query spans from S3 (filter by app_id if provided)
+                start_ns = time.perf_counter_ns()
                 spans_df = query_spans_by_timestamp(start_dt, end_dt, app_id)
+                end_ns = time.perf_counter_ns()
+                log.info(f"Queried spans in {(end_ns - start_ns) / 1e9:.2f} seconds")
 
                 if spans_df is None or spans_df.empty:
                     log.warning("No spans found for the given time range")
                     continue
                 
+                start_ns = time.perf_counter_ns() 
                 traces = build_trace_dags_from_csv(spans_df)
                 ranking = rank_root_causes(traces, kb)
+                rca_processed_time = time.perf_counter_ns() - start_ns
+
                 log.info(f"Stage 1 ranking: {ranking}")
 
                 # ── Stage 2: Log Evidence + LLM Analysis ──────────────
                 llm_result = None
                 logs = {}
                 try:
-                    top_k_services = [svc for svc, _ in ranking[:5]]
+                    top_k_services = [svc for svc, _ in ranking[:3]]
                     from datetime import timedelta
-                    log_start = start_dt - timedelta(minutes=5)
-                    log_end = end_dt + timedelta(minutes=5)
+                    log_start = start_dt - timedelta(minutes=0.25)
+                    log_end = end_dt
                     logs = log_extractor.query_logs_for_services(
                         top_k_services, log_start, log_end
                     )
@@ -307,7 +333,7 @@ def main():
                 except Exception as e:
                     log.error(f"Stage 2 failed, falling back to Stage 1: {e}", exc_info=True)
 
-                send_rca_notification(ranking, start_dt, end_dt, llm_result)
+                send_rca_notification(app_id, ranking, start_dt, end_dt, llm_result)
 
                 # ── Save incident to S3 ──────────────────────────
                 try:
@@ -317,6 +343,8 @@ def main():
                     incident_store.save_incident(inc)
                 except Exception as e:
                     log.error(f"Failed to save incident: {e}")
+
+                metrics_tracker.calculate_performance_metrics(spans_df, record["record_timestamp"], rca_processed_time)
 
             except Exception as e:
                 log.error(f"Error processing RCA task: {e}", exc_info=True)
