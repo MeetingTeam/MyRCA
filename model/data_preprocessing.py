@@ -143,8 +143,8 @@ def extract_records(otlp_json: dict) -> list[dict]:
 
 
 def build_partition_key(record: dict) -> str:
-    """Build partition key: <app_id>/<service>/<operation>/<service_instance_id>"""
-    return f"{record['app_id']}/{record['service']}/{record['operation']}/{record['service_instance_id']}"
+    """Build partition key: <app_id>/<service>/<operation>/<http_status>/<service_instance_id>"""
+    return f"{record['app_id']}/{record['service']}/{record['operation']}/{record['http_status']}/{record['service_instance_id']}"
 
 # ── Kafka producer callback ──────────────────────────────────────────────────
 
