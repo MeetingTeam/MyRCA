@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Lightweight dependencies only (no torch, scikit-learn, scipy)
+COPY mlops/requirements-mlops-light.txt .
+RUN pip install --no-cache-dir -r requirements-mlops-light.txt
+
+# Copy task code and shared common module
+COPY mlops/tasks/ tasks/
+COPY model/common/ common/
+
+CMD ["python", "-c", "print('MLOps lightweight pipeline image ready')"]

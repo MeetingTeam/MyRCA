@@ -1,0 +1,11 @@
+FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+COPY mlops/requirements-mlops-gpu.txt .
+RUN pip install --no-cache-dir -r requirements-mlops-gpu.txt
+COPY model/common/ common/
+COPY model/configs/ configs/
+COPY model/transformer_ae/ transformer_ae/
+COPY mlops/tasks/ tasks/
+ENV GIT_PYTHON_REFRESH=quiet
+CMD ["python", "-c", "print('MLOps GPU ready')"]
