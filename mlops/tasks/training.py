@@ -164,6 +164,40 @@ def run():
     train_df = read_parquet_from_s3(train_path)
     log.info("Training data: %d rows", len(train_df))
 
+    # Compute dataset stats for MLflow tracking (Phase 0: Evidently migration prerequisite)
+    dataset_stats = {
+        "train_data_path": train_path,
+        "train_data_rows": len(train_df),
+        "train_data_version": version_id,
+    }
+
+    # Per-app distribution (critical for per-app drift detection)
+    if "app_id" in train_df.columns:
+        app_counts = train_df["app_id"].value_counts().to_dict()
+        dataset_stats["app_distribution"] = app_counts
+        for app_id, count in app_counts.items():
+            safe_app_id = str(app_id).replace("-", "_").replace(" ", "_")
+            dataset_stats[f"app_{safe_app_id}_rows"] = int(count)
+
+    # Date range (useful for debugging data freshness)
+    ts_col = None
+    for col in ["startTime", "timestamp", "start_time"]:
+        if col in train_df.columns:
+            ts_col = col
+            break
+
+    if ts_col:
+        try:
+            dataset_stats["data_start_time"] = str(pd.to_datetime(train_df[ts_col].min()))
+            dataset_stats["data_end_time"] = str(pd.to_datetime(train_df[ts_col].max()))
+        except Exception:
+            pass
+
+    # Feature stats
+    dataset_stats["num_services"] = int(train_df["service"].nunique()) if "service" in train_df.columns else 0
+    dataset_stats["num_operations"] = int(train_df["operation"].nunique()) if "operation" in train_df.columns else 0
+    log.info("Dataset stats computed: %d apps, %d services", len(app_counts) if "app_id" in train_df.columns else 0, dataset_stats["num_services"])
+
     enc_local = os.path.join(local_dir, "encoders.pkl")
     s3_client.download_file(bucket, f"mlops/training-data/{version_id}/encoders.pkl", enc_local)
     encoders = joblib.load(enc_local)
@@ -219,7 +253,11 @@ def run():
     try:
         if mlflow_run:
             import mlflow
+            # Tags (searchable in MLflow UI)
             mlflow.set_tag("version_id", version_id)
+            mlflow.set_tag("train_data_path", train_path)
+
+            # Params (including dataset info for drift detection reference)
             mlflow.log_params({
                 "version_id": version_id,
                 "epochs": EPOCHS,
@@ -232,7 +270,18 @@ def run():
                 "latent_dim": 32,
                 "resumed_from_epoch": start_epoch,
                 "app_vocab": encoders["app_id"].get_unknown_index() + 1,
+                "train_data_s3_path": train_path,
+                "train_data_rows": len(train_df),
             })
+
+            # Per-app row counts as separate params (for filtering in MLflow)
+            if "app_id" in train_df.columns:
+                for app_id_val, count in train_df["app_id"].value_counts().items():
+                    safe_app_id = str(app_id_val).replace("-", "_").replace(" ", "_")
+                    mlflow.log_param(f"app_{safe_app_id}_rows", int(count))
+
+            # Log full dataset stats as JSON artifact
+            mlflow.log_dict(dataset_stats, "dataset_info.json")
 
         for epoch in range(start_epoch, EPOCHS):
             model.train()

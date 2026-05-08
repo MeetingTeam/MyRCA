@@ -1,0 +1,6 @@
+apiVersion: v2
+name: evidently-ui
+description: Evidently UI for ML monitoring with per-app drift dashboards
+type: application
+version: 1.0.0
+appVersion: "0.4.33"

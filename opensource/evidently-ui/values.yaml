@@ -1,0 +1,35 @@
+namespace: mlops
+
+replicaCount: 1
+
+image:
+  repository: evidentlyai/evidently-ui
+  tag: "0.4.33"
+  pullPolicy: IfNotPresent
+
+service:
+  type: NodePort
+  port: 8000
+  nodePort: 30800
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: "ebs-sc"
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+workspace:
+  path: /workspace
+
+# Known apps for project initialization
+apps:
+  - microservices-demo
+  - k8s-repo-application
