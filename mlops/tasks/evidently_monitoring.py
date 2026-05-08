@@ -12,6 +12,7 @@ from typing import Optional
 import pandas as pd
 from evidently import ColumnMapping
 from evidently.ui.workspace import Workspace
+from evidently.ui.remote import RemoteWorkspace
 
 from tasks.evidently_strategies import (
     ReportStrategy,
@@ -148,16 +149,22 @@ class SpanMonitoring:
 
 
 class WorkspaceManager:
-    """Manages Evidently UI Workspace and per-app projects."""
+    """Manages Evidently UI Workspace and per-app projects (local or remote)."""
 
     def __init__(self, workspace_path: str = "monitoring_workspace"):
         self.workspace_path = workspace_path
         self._workspace = None
+        self._is_remote = workspace_path.startswith("http://") or workspace_path.startswith("https://")
 
-    def get_workspace(self) -> Workspace:
-        """Get or create workspace."""
+    def get_workspace(self):
+        """Get or create workspace (local or remote based on path)."""
         if self._workspace is None:
-            self._workspace = Workspace.create(self.workspace_path)
+            if self._is_remote:
+                self._workspace = RemoteWorkspace(self.workspace_path)
+                log.info("Connected to remote Evidently workspace: %s", self.workspace_path)
+            else:
+                self._workspace = Workspace.create(self.workspace_path)
+                log.info("Created local Evidently workspace: %s", self.workspace_path)
         return self._workspace
 
     def get_or_create_project(self, app_id: str) -> str:

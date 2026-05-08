@@ -37,7 +37,9 @@ ENV_VARS = [
     k8s.V1EnvVar(name="S3_REGION", value=S3_REGION),
     k8s.V1EnvVar(name="S3_ENDPOINT", value="s3.amazonaws.com"),
     k8s.V1EnvVar(name="S3_USE_SSL", value="true"),
-    k8s.V1EnvVar(name="FORCE_DRIFT", value="true"),  # For testing full pipeline
+    k8s.V1EnvVar(name="FORCE_DRIFT", value="false"),  # Production: detect real drift
+    k8s.V1EnvVar(name="USE_EVIDENTLY", value="true"),  # Enable Evidently drift detection
+    k8s.V1EnvVar(name="EVIDENTLY_WORKSPACE", value="http://evidently-ui.mlops.svc.cluster.local:8000"),
 ]
 
 ENV_FROM = [

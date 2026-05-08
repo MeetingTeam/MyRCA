@@ -39,7 +39,7 @@ log = logging.getLogger("drift-detection")
 
 PSI_THRESHOLD = float(os.getenv("PSI_THRESHOLD", "0.2"))
 MIN_SAMPLE_COUNT = int(os.getenv("MIN_DRIFT_SAMPLES", "100"))
-FORCE_DRIFT = True  # TEMPORARY: hardcoded for testing full pipeline. Revert to: os.getenv("FORCE_DRIFT", "false").lower() == "true"
+FORCE_DRIFT = os.getenv("FORCE_DRIFT", "false").lower() == "true"
 NUM_BINS = 10
 
 # Evidently feature flag and configuration
