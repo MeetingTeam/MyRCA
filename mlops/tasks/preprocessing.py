@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone, timedelta
 
 import joblib
 import numpy as np
@@ -18,18 +19,24 @@ from sklearn.preprocessing import StandardScaler
 
 from common.safe_label_encoder import SafeLabelEncoder
 from common.util import map_status_group
-from tasks.s3_utils import get_duckdb_connection, read_parquet_from_s3, write_parquet_to_s3, s3_path
+from tasks.s3_utils import S3_BUCKET, get_duckdb_connection, read_parquet_from_s3, write_parquet_to_s3, s3_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("preprocessing")
+
+TRAINING_WINDOW_DAYS = int(os.getenv("TRAINING_WINDOW_DAYS", "3"))
 
 
 def preprocess_df(df):
     """Encode and scale features. Mirrors model/transformer_ae/train.py:preprocess_df."""
     df["http_status"] = df["http_status"].astype(int).apply(map_status_group)
 
+    # Default app_id when missing (older datasets without the column)
+    if "app_id" not in df.columns:
+        df["app_id"] = "unknown"
+
     encoders = {}
-    for col in ["service", "operation"]:
+    for col in ["service", "operation", "app_id"]:
         encoder = SafeLabelEncoder()
         df[col] = encoder.fit_transform(df[col].astype(str))
         encoders[col] = encoder
@@ -51,6 +58,22 @@ def preprocess_df(df):
     return df, encoders, scalers
 
 
+def load_training_data(window_days: int) -> pd.DataFrame:
+    """Load anomaly data from last N days."""
+    cutoff_epoch = (datetime.now(timezone.utc) - timedelta(days=window_days)).timestamp()
+
+    con = get_duckdb_connection()
+    df = con.execute(f"""
+        SELECT * FROM read_parquet(
+            's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet',
+            hive_partitioning=0, union_by_name=1
+        )
+        WHERE epoch(timestamp) >= {cutoff_epoch}
+    """).fetchdf()
+    con.close()
+    return df
+
+
 def run():
     # Read version_id from XCom (passed via env by KubernetesPodOperator)
     version_id = os.getenv("VERSION_ID")
@@ -60,14 +83,22 @@ def run():
 
     log.info("Preprocessing starting, version_id=%s", version_id)
 
-    # Read raw span data from inference output
-    try:
-        df = read_parquet_from_s3(s3_path("anomalies/data.parquet/**/*.parquet"))
-    except Exception as e:
-        log.error("Failed to read span data: %s", e)
+    window_days = TRAINING_WINDOW_DAYS
+    df = load_training_data(window_days)
+
+    if len(df) < 100:
+        log.warning("Only %d samples in %d-day window, trying 7 days", len(df), window_days)
+        window_days = 7
+        df = load_training_data(window_days)
+
+    if len(df) < 1000:
+        log.warning("Low samples (%d) - training will continue anyway", len(df))
+
+    if len(df) == 0:
+        log.error("No training data found - cannot train")
         sys.exit(1)
 
-    log.info("Raw data: %d rows", len(df))
+    log.info("Training data: %d rows from last %d days", len(df), window_days)
 
     # Ensure required columns exist — map column names if needed
     if "duration_ns" in df.columns and "duration" not in df.columns:

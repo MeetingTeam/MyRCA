@@ -4,27 +4,42 @@ Reuses the pattern from anomaly_detection_service.py.
 """
 
 import os
+from datetime import datetime, timedelta, timezone
+
 import duckdb
 import boto3
 
+
+DRIFT_WINDOW_MINUTES = int(os.getenv("DRIFT_WINDOW_MINUTES", "10"))
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+
+
+def _get_aws_credentials() -> tuple[str, str, str]:
+    """Get AWS credentials from boto3 session (supports IAM roles, env vars, etc.)."""
+    session = boto3.Session()
+    creds = session.get_credentials()
+    if creds is None:
+        return "", "", ""
+    frozen = creds.get_frozen_credentials()
+    return frozen.access_key or "", frozen.secret_key or "", frozen.token or ""
 
 
 def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     """Return a DuckDB connection with S3/httpfs configured."""
+    access_key, secret_key, session_token = _get_aws_credentials()
+
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute(f"""
         SET s3_endpoint='{S3_ENDPOINT}';
         SET s3_region='{S3_REGION}';
-        SET s3_access_key_id='{AWS_ACCESS_KEY_ID}';
-        SET s3_secret_access_key='{AWS_SECRET_ACCESS_KEY}';
+        SET s3_access_key_id='{access_key}';
+        SET s3_secret_access_key='{secret_key}';
+        SET s3_session_token='{session_token}';
         SET s3_use_ssl={'true' if S3_USE_SSL else 'false'};
         SET s3_url_style='path';
     """)
@@ -111,3 +126,17 @@ def list_s3_versions(prefix: str) -> list[str]:
         for cp in page.get("CommonPrefixes", []):
             versions.append(cp["Prefix"])
     return versions
+
+
+def list_recent_s3_keys(prefix: str, minutes: int = DRIFT_WINDOW_MINUTES) -> list[str]:
+    """List S3 keys modified in last N minutes."""
+    client = get_s3_client()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+    keys = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if obj["LastModified"].replace(tzinfo=timezone.utc) > cutoff:
+                keys.append(obj["Key"])
+    return keys
