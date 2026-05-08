@@ -3,7 +3,7 @@ namespace: mlops
 replicaCount: 1
 
 image:
-  repository: evidentlyai/evidently-ui
+  repository: evidently/evidently-service
   tag: "0.4.33"
   pullPolicy: IfNotPresent
 
