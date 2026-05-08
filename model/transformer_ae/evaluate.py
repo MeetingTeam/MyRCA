@@ -14,6 +14,7 @@ def preprocess_test_df(test_df, encoders, scalers):
     test_df = test_df.sort_values(by="startTime")
     test_df["raw_service"] = test_df["service"]
     test_df["raw_operation"] = test_df["operation"]
+    test_df["raw_app_id"] = test_df["app_id"]
     test_df["http_status"] = test_df["http_status"].astype(int).apply(map_status_group)
 
     # Default app_id when missing (older datasets without the column)
