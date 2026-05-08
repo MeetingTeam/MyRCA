@@ -18,7 +18,7 @@ default_args = {
     "retries": 0,
 }
 
-PIPELINE_IMAGE = "asdads6495/mlops-pipeline:dev"
+PIPELINE_IMAGE = "asdads6495/mlops-pipeline-light:dev"
 NAMESPACE = "airflow"
 
 ENV_VARS = [
