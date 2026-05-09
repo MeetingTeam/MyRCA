@@ -1,0 +1,35 @@
+# ServiceAccount for Airflow model deploy tasks
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: airflow-deploy-sa
+  namespace: airflow
+---
+# Role in anomaly-detection namespace for ConfigMap + Deployment management
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-model-deployer
+  namespace: anomaly-detection
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "update", "patch"]
+---
+# Bind the ServiceAccount to the Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-model-deployer-binding
+  namespace: anomaly-detection
+subjects:
+  - kind: ServiceAccount
+    name: airflow-deploy-sa
+    namespace: airflow
+roleRef:
+  kind: Role
+  name: airflow-model-deployer
+  apiGroup: rbac.authorization.k8s.io
