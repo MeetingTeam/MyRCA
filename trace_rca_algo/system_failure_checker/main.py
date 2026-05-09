@@ -11,19 +11,21 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from confluent_kafka import Producer
 import uvicorn
+import time
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
 OUTPUT_TOPIC = os.getenv("INPUT_TOPIC", "rca-task-data")
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
-S3_REGION = os.getenv("S3_REGION", "ap-southeast-7")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset")
+S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
+S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 FAILURE_THRESHOLD = float(os.getenv("FAILURE_THRESHOLD", "0.5"))
+MINIMUM_ANOMALY_SPANS = int(os.getenv("MINIMUM_ANOMALY_SPANS", "10"))
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "1"))
 TIME_WINDOW_MINUTES = int(os.getenv("TIME_WINDOW_MINUTES", "1"))
 APSCHEDULER_MAX_INSTANCES = int(os.getenv("APSCHEDULER_MAX_INSTANCES", "3"))
@@ -64,7 +66,7 @@ def init_duckdb_s3():
         );
     """)
 
-def send_failure_notification(abnormal_services, start_dt, end_dt):
+def send_failure_notification(app_id, abnormal_services, start_dt, end_dt):
     if not DISCORD_WEBHOOK_URL: return
     
     start_ts = int(start_dt.replace(tzinfo=timezone.utc).timestamp())
@@ -75,6 +77,7 @@ def send_failure_notification(abnormal_services, start_dt, end_dt):
 ## ⚡ Alert: System Failure
 `Time Window:` {discord_time}
 `Status:` 🔍 **Running RCA Algorithm**
+`App ID:` {app_id}
 `Failure Services:` {', '.join(abnormal_services)}
     """
     try:
@@ -83,7 +86,7 @@ def send_failure_notification(abnormal_services, start_dt, end_dt):
         log.error(f"Discord notification failed: {e}")
 
 # ── Core Logic ──────────────────────────────────────────────────────────────
-def check_system_failures(start_dt, end_dt):
+def check_system_failures(start_dt, end_dt, record_timestamp):
     """Query S3 data using the persistent global connection."""
     try:
         # Optimization: Use Hive Partitioning (date_part) to prune S3 files
@@ -98,32 +101,17 @@ def check_system_failures(start_dt, end_dt):
                 app_id,
                 service,
                 operation,
-                COUNT(*) as total_spans,
-                SUM(is_anomaly::INT) as abnormal_spans,
-                ROUND(AVG(is_anomaly::INT), 4) as abnormal_ratio
-            FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/*/*.parquet', hive_partitioning = 1)
+                AVG(is_anomaly::INT) as abnormal_ratio
+            FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet', hive_partitioning = 1)
             WHERE date_part BETWEEN '{start_date_str}' AND '{end_date_str}'
               AND "timestamp" BETWEEN '{start_ts_str}'::TIMESTAMP AND '{end_ts_str}'::TIMESTAMP
             GROUP BY app_id, service, operation
-            HAVING abnormal_spans > 0
-            ORDER BY abnormal_ratio DESC
+            HAVING SUM(is_anomaly::INT) > {MINIMUM_ANOMALY_SPANS}
         """
         
         # Retry on transient read errors (race condition: anomaly-detection
         # service may be overwriting the parquet file on S3 mid-read).
-        max_retries = 6
-        result = None
-        for attempt in range(max_retries):
-            try:
-                result = db_con.cursor().execute(query).fetchdf()
-                break
-            except (UnicodeDecodeError, duckdb.IOException) as read_err:
-                if attempt < max_retries - 1:
-                    log.warning("Transient S3 read error (attempt %d/%d): %s", attempt + 1, max_retries, read_err)
-                    time.sleep(1)
-                else:
-                    log.warning("S3 read failed after %d attempts, skipping this window", max_retries)
-                    return
+        result = db_con.cursor().execute(query).fetchdf()
 
         if result.empty:
             log.info("No anomalies found in window %s to %s", start_ts_str, end_ts_str)
@@ -144,10 +132,11 @@ def check_system_failures(start_dt, end_dt):
             record = {
                 "app_id": app_id,
                 "start_dt": start_dt.isoformat(),
-                "end_dt": end_dt.isoformat()
+                "end_dt": end_dt.isoformat(),
+                "record_timestamp": record_timestamp
             }
             producer.produce(OUTPUT_TOPIC, json.dumps(record).encode("utf-8"), callback=_delivery_report)
-            send_failure_notification(abnormal_services, start_dt, end_dt)
+            send_failure_notification(app_id, abnormal_services, start_dt, end_dt)
 
         producer.flush()
 
@@ -155,9 +144,10 @@ def check_system_failures(start_dt, end_dt):
         log.error("Error in check_system_failures: %s", e, exc_info=True)
 
 def check_current_failure():
+    record_timestamp = time.time_ns()
     end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
     start_dt = end_dt - timedelta(minutes=TIME_WINDOW_MINUTES)
-    check_system_failures(start_dt, end_dt)
+    check_system_failures(start_dt, end_dt, record_timestamp)
 
 # ── Lifecycle ───────────────────────────────────────────────────────────────
 @app.on_event("startup")

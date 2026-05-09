@@ -31,7 +31,7 @@ data:
 
 env:
 - name: MLFLOW_TRACKING_URI
-  value: http://mlflow.mlflow.svc.cluster.local:5000
+  value: http://mlflow-tracking.mlflow.svc.cluster.local:5000
 - name: S3_BUCKET
   value: kltn-anomaly-dateset-1
 - name: S3_REGION

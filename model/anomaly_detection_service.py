@@ -26,6 +26,8 @@ from confluent_kafka import Consumer, KafkaError, KafkaException
 
 from model_registry import ModelRegistry
 from transformer_ae.evaluate import preprocess_test_df, build_sequences
+from common.util import map_status_group
+from common.performance_metrics import MetricsTracker
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -49,6 +51,8 @@ S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
+# Toggle detailed performance measurement (timing + metrics calculation)
+PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "false").lower() == "true"
 # Health server
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8080"))
 
@@ -58,7 +62,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("anomaly-detection")
 
-db_con = duckdb.connect(database=':memory:')
+# Persistent global DuckDB connection
+db_con = duckdb.connect(database=':memory:') 
+# Initialise metrics tracker
+metrics_tracker = MetricsTracker()
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 
@@ -140,6 +147,18 @@ def write_to_s3(result_df: pd.DataFrame):
 
     write_con = duckdb.connect(database=":memory:")
     try:
+        # Debug: print a few app_id values before DuckDB write
+        if "app_id" in result_df.columns:
+            sample_app_ids = result_df["app_id"].head(10).tolist()
+            log.info("Sample app_id values (first 10): %s", sample_app_ids)
+
+            # Optional: also inspect null / empty cases
+            null_count = result_df["app_id"].isna().sum()
+            empty_count = (result_df["app_id"].astype(str).str.strip() == "").sum()
+            log.info("app_id null_count=%d, empty_count=%d", null_count, empty_count)
+        else:
+            log.error("app_id column missing before S3 write")
+        
         write_con.execute("INSTALL httpfs; LOAD httpfs;")
         write_con.execute(f"""
             CREATE OR REPLACE SECRET (
@@ -357,7 +376,17 @@ def main():
                 if valid_msgs:
                     log.info("Received %d messages, processing…", len(valid_msgs))
                     try:
+                        # Start timer (high precision) only when performance measurement enabled
+                        if PERF_MEASUREMENT_ENABLED:
+                            start_ns = time.perf_counter_ns()
+
                         result_df = process_batch(valid_msgs)
+
+                        # Record per-row ML processing time only when enabled and result exists
+                        if PERF_MEASUREMENT_ENABLED and result_df is not None and not result_df.empty:
+                            ml_batch_processed_time = time.perf_counter_ns() - start_ns
+                            result_df["ml_batch_processed_time"] = ml_batch_processed_time / len(result_df)
+                        
                         if result_df is not None and not result_df.empty:
                             write_buffer.append(result_df)
                             buffer_rows += len(result_df)
@@ -374,12 +403,13 @@ def main():
                     flushed = flush_buffer(write_buffer)
                     total_processed += flushed
                     log.info("Flushed %d buffered records to S3", flushed)
+                    if PERF_MEASUREMENT_ENABLED:
+                        metrics_tracker.calculate_performance_metrics(write_buffer)
                 except Exception as e:
                     log.error("Error flushing buffer to S3: %s", e, exc_info=True)
                 write_buffer.clear()
                 buffer_rows = 0
                 last_flush_time = time.time()
-
     except KafkaException as e:
         log.error("Kafka exception: %s", e)
     finally:
@@ -388,6 +418,8 @@ def main():
                 flushed = flush_buffer(write_buffer)
                 total_processed += flushed
                 log.info("Final flush: %d records to S3", flushed)
+                if PERF_MEASUREMENT_ENABLED:
+                    metrics_tracker.calculate_performance_metrics(write_buffer)
             except Exception as e:
                 log.error("Error in final flush: %s", e, exc_info=True)
         consumer.close()

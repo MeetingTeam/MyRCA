@@ -4,8 +4,6 @@ import os
 from datetime import datetime, timedelta, timezone
 import json
 from kb_building import train_knowledge_base
-import mlflow
-from mlflow.tracking import MlflowClient
 import pandas as pd
 import boto3
 
@@ -16,8 +14,8 @@ S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
-TIME_WINDOW_DAYS = int(os.getenv("TIME_WINDOW_DAYS", "2"))
-DATASET_LIMIT = int(os.getenv("DATASET_LIMIT", "3000"))
+TIME_WINDOW_DAYS = int(os.getenv("TIME_WINDOW_DAYS", "0"))
+DATASET_LIMIT = int(os.getenv("DATASET_LIMIT", "100000"))
 
 AIRFLOW_RUN_ID = os.getenv("AIRFLOW_RUN_ID", "manual_run")
 
@@ -37,9 +35,6 @@ db_con.execute(f"""
     );
 """)
 
-# Initialize MLflow
-mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-
 # Initialize direct S3 client
 s3_client = boto3.client(
     "s3",
@@ -49,7 +44,13 @@ s3_client = boto3.client(
 )
 
 def register_to_mlflow(new_kb_dict):
-    # 1. Get current production KB metadata only
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    
+    # Initialize MLflow
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    
+    # # 1. Get current production KB metadata only
     try:
         model_uri = f"models:/{MLFLOW_KB_MODEL}@production"
         current_model = mlflow.pyfunc.load_model(model_uri)
@@ -57,7 +58,7 @@ def register_to_mlflow(new_kb_dict):
     except Exception:
         current_kb = None
 
-    # 2. Simple comparison
+    # # 2. Simple comparison
     if current_kb == new_kb_dict:
         print("No change in KB. Skip logging.")
         return current_kb
@@ -69,7 +70,7 @@ def register_to_mlflow(new_kb_dict):
     with open(kb_path, "w") as f:
         json.dump(new_kb_dict, f)
 
-    # 4. Upload directly to S3
+    # # 4. Upload directly to S3
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     s3_key = f"mlops/{MLFLOW_KB_MODEL}/{AIRFLOW_RUN_ID}_{timestamp}/built_kb.json"
 
@@ -77,7 +78,7 @@ def register_to_mlflow(new_kb_dict):
 
     kb_s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
 
-    # 5. Log only metadata to MLflow (no artifact upload)
+    # # 5. Log only metadata to MLflow (no artifact upload)
     with mlflow.start_run() as run:
         client = MlflowClient()
         
@@ -113,7 +114,7 @@ def main():
         WHERE date_part BETWEEN ? AND ?
         LIMIT ?
     """, [
-        f's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet',
+        f's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet',
         start_date_str,
         end_date_str,
         DATASET_LIMIT

@@ -25,13 +25,4 @@ data:
       {{- toYaml .Values.ingestor.otel_config.exporters | nindent 6 }}
 
     service:
-      extensions: [health_check]
-      pipelines:
-        traces:
-          receivers: [otlp]
-          processors: [filter/drop_no_app_id, batch]
-          exporters: [otlp, kafka]
-        logs:
-          receivers: [otlp]
-          processors: [batch]
-          exporters: [otlphttp/loki]
+      {{- toYaml .Values.ingestor.otel_config.service | nindent 6 }}
