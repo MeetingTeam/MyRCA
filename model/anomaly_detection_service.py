@@ -376,7 +376,6 @@ def main():
                 if valid_msgs:
                     log.info("Received %d messages, processing…", len(valid_msgs))
                     try:
-<<<<<<< HEAD
                         # Start timer (high precision) only when performance measurement enabled
                         if PERF_MEASUREMENT_ENABLED:
                             start_ns = time.perf_counter_ns()
@@ -388,9 +387,6 @@ def main():
                             ml_batch_processed_time = time.perf_counter_ns() - start_ns
                             result_df["ml_batch_processed_time"] = ml_batch_processed_time / len(result_df)
                         
-=======
-                        result_df = process_batch(valid_msgs)
->>>>>>> main
                         if result_df is not None and not result_df.empty:
                             write_buffer.append(result_df)
                             buffer_rows += len(result_df)
