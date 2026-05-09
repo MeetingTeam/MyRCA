@@ -32,7 +32,7 @@ S3_REGION = "ap-southeast-1"
 S3_BUCKET = "kltn-anomaly-dateset-1"
 
 ENV_VARS = [
-    k8s.V1EnvVar(name="MLFLOW_TRACKING_URI", value="http://mlflow.mlflow.svc.cluster.local:5000"),
+    k8s.V1EnvVar(name="MLFLOW_TRACKING_URI", value="http://mlflow-tracking.mlflow.svc.cluster.local:5000"),
     k8s.V1EnvVar(name="S3_BUCKET", value=S3_BUCKET),
     k8s.V1EnvVar(name="S3_REGION", value=S3_REGION),
     k8s.V1EnvVar(name="S3_ENDPOINT", value="s3.amazonaws.com"),
@@ -40,6 +40,7 @@ ENV_VARS = [
     k8s.V1EnvVar(name="FORCE_DRIFT", value="false"),  # Production: detect real drift
     k8s.V1EnvVar(name="USE_EVIDENTLY", value="true"),  # Enable Evidently drift detection
     k8s.V1EnvVar(name="EVIDENTLY_WORKSPACE", value="http://evidently-ui.mlops.svc.cluster.local:8000"),
+    k8s.V1EnvVar(name="MIN_DRIFT_SAMPLES", value="10"),  # Lower threshold for testing
 ]
 
 ENV_FROM = [
@@ -235,8 +236,32 @@ with DAG(
     )
 
     # ─────────────────────────────────────────────────────────────
+    # Model Comparison (Outputs recommendation for admin review)
+    # ─────────────────────────────────────────────────────────────
+
+    model_comparison = KubernetesPodOperator(
+        task_id="model_comparison",
+        name="model-comparison",
+        namespace=NAMESPACE,
+        image=PIPELINE_IMAGE,
+        image_pull_policy="Always",
+        cmds=["python", "-m", "tasks.model_comparison"],
+        env_vars=ENV_VARS + [
+            k8s.V1EnvVar(
+                name="VERSION_ID",
+                value="{{ ti.xcom_pull(task_ids='drift_detection', key='return_value')['version_id'] }}",
+            ),
+        ],
+        env_from=ENV_FROM,
+        do_xcom_push=True,
+        is_delete_operator_pod=True,
+        get_logs=True,
+        startup_timeout_seconds=300,
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # Task dependencies
     # ─────────────────────────────────────────────────────────────
 
     compact >> drift_detection >> check_drift_result >> [trigger_retrain, no_retrain]
-    trigger_retrain >> preprocess >> train >> fetch_train_result >> evaluate >> fetch_evaluate_result
+    trigger_retrain >> preprocess >> train >> fetch_train_result >> evaluate >> fetch_evaluate_result >> model_comparison
