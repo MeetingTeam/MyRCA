@@ -108,6 +108,31 @@ def run():
     test_df = read_parquet_from_s3(s3_path(external_test_path))
     log.info("Using external test dataset: %s (%d rows)", external_test_path, len(test_df))
 
+    # Compute eval dataset stats for MLflow tracking
+    eval_dataset_stats = {
+        "eval_data_path": s3_path(external_test_path),
+        "eval_data_rows": len(test_df),
+        "eval_data_source": "external_fixed",
+        "eval_data_version": "mt-test-data-v1",
+    }
+
+    if "app_id" in test_df.columns:
+        app_counts = test_df["app_id"].value_counts().head(10).to_dict()
+        eval_dataset_stats["app_distribution"] = {str(k): int(v) for k, v in app_counts.items()}
+        eval_dataset_stats["num_apps"] = int(test_df["app_id"].nunique())
+
+    for col in ["startTime", "timestamp", "start_time"]:
+        if col in test_df.columns:
+            try:
+                eval_dataset_stats["data_start_time"] = str(pd.to_datetime(test_df[col].min()))
+                eval_dataset_stats["data_end_time"] = str(pd.to_datetime(test_df[col].max()))
+            except Exception:
+                pass
+            break
+
+    log.info("Eval dataset stats: %d rows, source=%s",
+             eval_dataset_stats["eval_data_rows"], eval_dataset_stats["eval_data_source"])
+
     rename_map = {
         "trace_id": "traceId", "span_id": "spanId", "parent_span_id": "parentSpanId",
     }
@@ -210,7 +235,20 @@ def run():
     if mlflow_run:
         import mlflow
         try:
-            mlflow.log_params({"version_id": version_id, "seq_len": SEQ_LEN})
+            # Tags (searchable in MLflow UI)
+            mlflow.set_tag("eval_data_path", eval_dataset_stats["eval_data_path"])
+            mlflow.set_tag("eval_data_source", eval_dataset_stats["eval_data_source"])
+
+            # Params
+            mlflow.log_params({
+                "version_id": version_id,
+                "seq_len": SEQ_LEN,
+                "eval_data_s3_path": eval_dataset_stats["eval_data_path"],
+                "eval_data_rows": eval_dataset_stats["eval_data_rows"],
+                "eval_data_source": eval_dataset_stats["eval_data_source"],
+            })
+
+            # Metrics
             mlflow.log_metrics({
                 "p99_threshold": p99_threshold,
                 "mean_score": mean_score,
@@ -218,6 +256,9 @@ def run():
                 "normal_samples": int(normal_mask.sum()),
                 **classification_metrics,
             })
+
+            # Full eval dataset stats as artifact
+            mlflow.log_dict(eval_dataset_stats, "eval_dataset_info.json")
         finally:
             mlflow.end_run()
 

@@ -84,26 +84,25 @@ def run():
     apps_v1.patch_namespaced_deployment(DEPLOYMENT_NAME, NAMESPACE, restart_patch)
     log.info("Deployment %s rolling restart triggered", DEPLOYMENT_NAME)
 
-    # Transition model to Production in MLflow (optional, best-effort)
+    # Set model alias to champion in MLflow (optional, best-effort)
     try:
         import mlflow
-        mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
+        mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-tracking.mlflow.svc.cluster.local:5000")
         mlflow.set_tracking_uri(mlflow_uri)
         mlflow_client = mlflow.tracking.MlflowClient()
 
-        # Find latest version of the model
-        versions = mlflow_client.search_model_versions(f"name='transformer-ae'")
+        # Find model version by version_id tag
+        versions = mlflow_client.search_model_versions(
+            f"name='transformer-ae'", max_results=50, order_by=["creation_timestamp DESC"]
+        )
         for v in versions:
-            if v.run_id and version_id in (v.tags.get("version_id", "") if v.tags else ""):
-                mlflow_client.transition_model_version_stage(
-                    name="transformer-ae",
-                    version=v.version,
-                    stage="Production",
-                )
-                log.info("MLflow model version %s transitioned to Production", v.version)
+            run = mlflow_client.get_run(v.run_id) if v.run_id else None
+            if run and run.data.tags.get("version_id") == version_id:
+                mlflow_client.set_registered_model_alias("transformer-ae", "champion", v.version)
+                log.info("MLflow model version %s set as champion alias", v.version)
                 break
     except Exception as e:
-        log.warning("Could not update MLflow model stage: %s", e)
+        log.warning("Could not update MLflow model alias: %s", e)
 
     log.info("Model deploy complete for version %s", version_id)
 

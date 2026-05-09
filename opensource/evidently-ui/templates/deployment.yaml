@@ -19,6 +19,8 @@ spec:
         - name: evidently-ui
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["evidently"]
+          args: ["ui", "--workspace", "{{ .Values.workspace.path }}", "--host", "0.0.0.0", "--port", "8000"]
           ports:
             - containerPort: 8000
               name: http
