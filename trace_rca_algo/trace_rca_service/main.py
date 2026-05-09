@@ -31,6 +31,9 @@ S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
+# Toggle detailed performance measurement (timing + metrics calculation)
+PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "true").lower() == "true"
+
 S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset-1/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
@@ -296,19 +299,25 @@ def main():
                 log.info(f"Processing RCA task: app={app_id}, {start_dt} to {end_dt}")
 
                 # Query spans from S3 (filter by app_id if provided)
-                start_ns = time.perf_counter_ns()
+                if PERF_MEASUREMENT_ENABLED:
+                    start_ns = time.perf_counter_ns()
                 spans_df = query_spans_by_timestamp(start_dt, end_dt, app_id)
-                end_ns = time.perf_counter_ns()
-                log.info(f"Queried spans in {(end_ns - start_ns) / 1e9:.2f} seconds")
+                if PERF_MEASUREMENT_ENABLED:
+                    end_ns = time.perf_counter_ns()
+                    log.info(f"Queried spans in {(end_ns - start_ns) / 1e9:.2f} seconds")
 
                 if spans_df is None or spans_df.empty:
                     log.warning("No spans found for the given time range")
                     continue
                 
-                start_ns = time.perf_counter_ns() 
+                if PERF_MEASUREMENT_ENABLED:
+                    start_ns = time.perf_counter_ns()
                 traces = build_trace_dags_from_csv(spans_df)
                 ranking = rank_root_causes(traces, kb)
-                rca_processed_time = time.perf_counter_ns() - start_ns
+                if PERF_MEASUREMENT_ENABLED:
+                    rca_processed_time = time.perf_counter_ns() - start_ns
+                else:
+                    rca_processed_time = None
 
                 log.info(f"Stage 1 ranking: {ranking}")
 
@@ -344,7 +353,8 @@ def main():
                 except Exception as e:
                     log.error(f"Failed to save incident: {e}")
 
-                metrics_tracker.calculate_performance_metrics(spans_df, record["record_timestamp"], rca_processed_time)
+                if PERF_MEASUREMENT_ENABLED:
+                    metrics_tracker.calculate_performance_metrics(spans_df, record["record_timestamp"], rca_processed_time)
 
             except Exception as e:
                 log.error(f"Error processing RCA task: {e}", exc_info=True)

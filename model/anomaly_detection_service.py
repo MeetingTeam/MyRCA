@@ -48,6 +48,9 @@ S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
+# Toggle detailed performance measurement (timing + metrics calculation)
+PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "false").lower() == "true"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -375,11 +378,18 @@ def main():
                 if valid_msgs:
                     log.info("Received %d messages, processing…", len(valid_msgs))
                     try:
-                        # Start timer (high precision)
-                        start_ns = time.perf_counter_ns() 
-                        result_df = process_batch(valid_msgs, model, encoders, scalers, device)     
-                        ml_batch_processed_time = time.perf_counter_ns() - start_ns
-                        result_df["ml_batch_processed_time"] = ml_batch_processed_time/len(result_df)
+                        # Start timer (high precision) only when performance measurement enabled
+                        if PERF_MEASUREMENT_ENABLED:
+                            start_ns = time.perf_counter_ns()
+                        else:
+                            start_ns = None
+
+                        result_df = process_batch(valid_msgs, model, encoders, scalers, device)
+
+                        # Record per-row ML processing time only when enabled and result exists
+                        if PERF_MEASUREMENT_ENABLED and result_df is not None and not result_df.empty:
+                            ml_batch_processed_time = time.perf_counter_ns() - start_ns
+                            result_df["ml_batch_processed_time"] = ml_batch_processed_time / len(result_df)
                         
                         if result_df is not None and not result_df.empty:
                             write_buffer.append(result_df)
@@ -398,7 +408,8 @@ def main():
                     flushed = flush_buffer(write_buffer)
                     total_processed += flushed
                     log.info("Flushed %d buffered records to S3", flushed)
-                    metrics_tracker.calculate_performance_metrics(write_buffer)
+                    if PERF_MEASUREMENT_ENABLED:
+                        metrics_tracker.calculate_performance_metrics(write_buffer)
                 except Exception as e:
                     log.error("Error flushing buffer to S3: %s", e, exc_info=True)
                 write_buffer.clear()
@@ -413,7 +424,8 @@ def main():
                 flushed = flush_buffer(write_buffer)
                 total_processed += flushed
                 log.info("Final flush: %d records to S3", flushed)
-                metrics_tracker.calculate_performance_metrics(write_buffer)
+                if PERF_MEASUREMENT_ENABLED:
+                    metrics_tracker.calculate_performance_metrics(write_buffer)
             except Exception as e:
                 log.error("Error in final flush: %s", e, exc_info=True)
         consumer.close()
