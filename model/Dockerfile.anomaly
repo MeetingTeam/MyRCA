@@ -14,6 +14,7 @@ COPY configs/ configs/
 COPY transformer_ae/ transformer_ae/
 
 # Copy main service script
+COPY model_registry.py .
 COPY anomaly_detection_service.py .
 
 CMD ["python", "-u", "anomaly_detection_service.py"]

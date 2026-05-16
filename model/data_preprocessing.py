@@ -5,6 +5,8 @@ import logging
 from confluent_kafka import Consumer, Producer, KafkaError, KafkaException
 from common.util import normalize_operation
 from configs.constants import UNKNOWN
+from datetime import datetime, timezone
+import time
 
 # ── Configuration (from environment variables) ────────────────────────────────
 
@@ -92,7 +94,7 @@ def filter_span(lib, span):
 
 # ── OTLP JSON → flat feature records ────────────────────────────────────────
 
-def extract_records(otlp_json: dict) -> list[dict]:
+def extract_records(otlp_json: dict, preprocessed_time: int) -> list[dict]:
     """
     Parse an OTLP JSON message (as exported by otel-collector kafka exporter)
     and return a list of flat feature dicts, one per qualifying span.
@@ -136,6 +138,7 @@ def extract_records(otlp_json: dict) -> list[dict]:
                     "duration": int(raw_span["endTimeUnixNano"]) - int(raw_span["startTimeUnixNano"]),
                     "span_status": raw_span.get("status", {}).get("code", 1),
                     "http_status": http_status,
+                    "preprocessed_time": preprocessed_time
                 }
 
                 records.append(record)
@@ -143,8 +146,9 @@ def extract_records(otlp_json: dict) -> list[dict]:
 
 
 def build_partition_key(record: dict) -> str:
-    """Build partition key: <app_id>/<service>/<operation>/<http_status>/<service_instance_id>"""
-    return f"{record['app_id']}/{record['service']}/{record['operation']}/{record['http_status']}/{record['service_instance_id']}"
+    """Build partition key: <app_id>/<service>/<operation>/<http_status>/<service_instance_id>/<timestamp_to_minute>"""
+    ts = datetime.now(timezone.utc).strftime("%Y/%m/%d/%H/%M")
+    return f"{record['app_id']}/{record['service']}/{record['operation']}/{record['http_status']}/{record['service_instance_id']}/{ts}"
 
 # ── Kafka producer callback ──────────────────────────────────────────────────
 
@@ -181,6 +185,7 @@ def main():
             if msg is None:
                 producer.poll(0)  # trigger delivery callbacks
                 continue
+            preprocessed_time = time.time_ns()
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
                     continue
@@ -195,7 +200,7 @@ def main():
                 continue
 
             total_consumed += 1
-            records = extract_records(otlp_data)
+            records = extract_records(otlp_data, preprocessed_time)
 
             for record in records:
                 key = build_partition_key(record)

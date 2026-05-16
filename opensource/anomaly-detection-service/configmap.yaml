@@ -16,6 +16,14 @@ data:
   MODEL_S3_PATH: ""
   MODEL_VERSION: ""
   FLUSH_ROW_THRESHOLD: "500"
-  FLUSH_INTERVAL_SECONDS: "2"
+  FLUSH_INTERVAL_SECONDS: "5"
   HEALTH_PORT: "8080"
   MAX_CACHED_MODELS: "10"
+
+  CLICKHOUSE_HOST: "clickhouse-cluster-client.clickhouse.svc.cluster.local"
+  CLICKHOUSE_PORT: "9000"
+  CLICKHOUSE_USER: "default"
+  CLICKHOUSE_DATABASE: "default"
+
+  PERF_MEASUREMENT_ENABLED: "true"
+

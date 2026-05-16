@@ -8,3 +8,4 @@ data:
   INPUT_TOPIC: "traces"
   OUTPUT_TOPIC: "preprocess-data"
   CONSUMER_GROUP: "preprocessing-group"
+  PERF_MEASUREMENT_ENABLED: "true"

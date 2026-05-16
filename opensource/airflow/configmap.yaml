@@ -1,0 +1,18 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-kb-builder-configmap
+  namespace: airflow
+data:
+  S3_ENDPOINT: "s3.amazonaws.com"
+  S3_REGION: "ap-southeast-1"
+  S3_BUCKET: "kltn-anomaly-dateset-1"
+  S3_USE_SSL: "true"
+
+  MLFLOW_TRACKING_URI: "http://mlflow-tracking.mlflow.svc.cluster.local:5000"
+  MLFLOW_KB_MODEL: "rca-knowledge-base"
+
+  CLICKHOUSE_HOST: "clickhouse-cluster-client.clickhouse.svc.cluster.local"
+  CLICKHOUSE_PORT: "9000"
+  CLICKHOUSE_DATABASE: "default"

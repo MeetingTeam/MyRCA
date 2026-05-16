@@ -5,14 +5,7 @@ from airflow.utils.dates import days_ago
 from datetime import datetime
 from kubernetes.client import models as k8s
 
-S3_ENDPOINT = "s3.amazonaws.com"
-S3_REGION = "ap-southeast-1"
-S3_BUCKET = "kltn-anomaly-dateset-1"
-S3_USE_SSL = "true"
-
-KB_BUILDER_IMAGE = "hungtran679/kb_builder"
-MLFLOW_TRACKING_URI = "http://mlflow-tracking.mlflow.svc.cluster.local:5000"
-MLFLOW_KB_MODEL = "rca-knowledge-base"
+KB_BUILDER_IMAGE="hungtran679/kb_builder"
 
 # --- DAG Definition ---
 with DAG(
@@ -30,14 +23,10 @@ with DAG(
         name='kb-builder-pod',
         image=KB_BUILDER_IMAGE,
         image_pull_policy="Always",
-        env_vars={
-            'MLFLOW_TRACKING_URI': MLFLOW_TRACKING_URI,
-            'S3_REGION': S3_REGION,
-            'S3_BUCKET': S3_BUCKET,
-            'AIRFLOW_RUN_ID': '{{ run_id }}'
-        },
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="airflow-aws-secret")),
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="airflow-clickhouse-secret")),
+            k8s.V1EnvFromSource(config_map_ref=k8s.V1ConfigMapEnvSource(name="airflow-kb-builder-configmap"))
         ],
         container_resources=k8s.V1ResourceRequirements(
             requests={"cpu": "200m", "memory": "512Mi"},

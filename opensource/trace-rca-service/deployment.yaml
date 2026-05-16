@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: trace-rca-service
-          image: hungtran679/trace_rca_service:test
+          image: hungtran679/trace_rca_service:latest
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

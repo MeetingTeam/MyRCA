@@ -41,10 +41,9 @@ class MetricsTracker:
         batch_size = len(df)
         end_time = time.time_ns()
 
-        df["startTime"] = df["startTime"].astype("int64")
-        df["duration"] = df["duration"].astype("int64")
+        df["preprocessed_time"] = df["preprocessed_time"].astype("int64")
 
-        service_times = end_time - (df["startTime"] + df["duration"])
+        service_times = end_time - df["preprocessed_time"]
         ml_batch_processed_time = df["ml_batch_processed_time"].sum()
 
         with self._lock:

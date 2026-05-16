@@ -7,3 +7,4 @@ requests
 numpy
 pandas
 boto3
+clickhouse-driver

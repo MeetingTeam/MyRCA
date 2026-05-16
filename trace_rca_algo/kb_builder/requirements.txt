@@ -2,3 +2,4 @@ duckdb
 mlflow-skinny
 pandas
 boto3
+clickhouse-driver
