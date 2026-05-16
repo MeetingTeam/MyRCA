@@ -16,3 +16,9 @@ data:
   CHECK_INTERVAL_MINUTES: "1"
   TIME_WINDOW_MINUTES: "2"
   MINIMUM_ANOMALY_SPANS: "10"
+
+  CLICKHOUSE_HOST: "clickhouse-cluster-client.clickhouse.svc.cluster.local"
+  CLICKHOUSE_PORT: "9000"
+  CLICKHOUSE_USER: "default"
+  CLICKHOUSE_DATABASE: "default"
+  PERF_MEASUREMENT_ENABLED: "true"

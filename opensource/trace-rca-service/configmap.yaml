@@ -20,3 +20,9 @@ data:
   ANTHROPIC_BASE_URL: "https://taphoaapi.info.vn/"
 
   MLFLOW_KB_VERSION: "1.0"
+
+  CLICKHOUSE_HOST: "clickhouse-cluster-client.clickhouse.svc.cluster.local"
+  CLICKHOUSE_PORT: "9000"
+  CLICKHOUSE_USER: "default"
+  CLICKHOUSE_DATABASE: "default"
+  PERF_MEASUREMENT_ENABLED: "true"

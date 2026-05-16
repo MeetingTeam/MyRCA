@@ -6,7 +6,7 @@ metadata:
   labels:
     app: preprocessing-service
 spec:
-  replicas: 2
+  replicas: 5
   selector:
     matchLabels:
       app: preprocessing-service
@@ -17,16 +17,16 @@ spec:
     spec:
       containers:
         - name: preprocessing-service
-          image: hungtran679/preprocessing-service
+          image: hungtran679/preprocessing-service:latest
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: preprocessing-service-config
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 50m
+              memory: 64Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: 50m
+              memory: 64Mi
       restartPolicy: Always

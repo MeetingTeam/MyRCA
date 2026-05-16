@@ -54,11 +54,11 @@ flower:
 
 images:
   airflow:
-    repository: asdads6495/my-airflow
+    repository: hungtran679/my-airflow
     tag: latest
     pullPolicy: Always
   pod_template:
-    repository: asdads6495/my-airflow
+    repository: hungtran679/my-airflow
     tag: latest
     pullPolicy: Always
 

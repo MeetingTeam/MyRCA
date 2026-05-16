@@ -715,4 +715,11 @@ Redpanda export deferred to Phase 7.
   # Access UI at http://<NODE-IP>:30340
   ```
 
+### 8.5 Deploy ClickHouse
+helm install clickhouse-operator \
+  oci://ghcr.io/clickhouse/clickhouse-operator-helm \
+  -n clickhouse \
+  -f clickhouse/values.custom.yaml \
+  --create-namespace
+
 **Phase 8 Status:** Not Started

@@ -6,7 +6,7 @@ metadata:
   labels:
     app: anomaly-detection-service
 spec:
-  replicas: 2
+  replicas: 8
   selector:
     matchLabels:
       app: anomaly-detection-service
@@ -17,18 +17,18 @@ spec:
     spec:
       containers:
         - name: anomaly-detection-service
-          image: asdads6495/myrca-anomaly-detection:1.4.1-27058b0
+          image: hungtran679/anomaly-detection-service:latest
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: anomaly-detection-service-config
             - secretRef:
-                name: anomaly-detection-aws-secret
+                name: anomaly-detection-service-secret
           resources:
             requests:
               cpu: 200m
-              memory: 512Mi
+              memory: 400Mi
             limits:
-              cpu: "1"
-              memory: 2Gi
+              cpu: 200m
+              memory: 400Mi
       restartPolicy: Always

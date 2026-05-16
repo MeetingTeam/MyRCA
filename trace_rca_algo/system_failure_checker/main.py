@@ -12,17 +12,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from confluent_kafka import Producer
 import uvicorn
 import time
+from clickhouse_driver import Client as ClickHouseClient
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
 OUTPUT_TOPIC = os.getenv("INPUT_TOPIC", "rca-task-data")
-
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
-S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
-S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 FAILURE_THRESHOLD = float(os.getenv("FAILURE_THRESHOLD", "0.5"))
 MINIMUM_ANOMALY_SPANS = int(os.getenv("MINIMUM_ANOMALY_SPANS", "10"))
@@ -33,16 +27,29 @@ APSCHEDULER_MISFIRE_GRACE_TIME = int(os.getenv("APSCHEDULER_MISFIRE_GRACE_TIME",
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
+# ClickHouse config
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "9000"))
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
+CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
+
 # ── Global Objects ──────────────────────────────────────────────────────────
 app = FastAPI(title="System Failure Checker", version="1.1.0")
 scheduler = BackgroundScheduler()
-# Persistent global DuckDB connection
-db_con = duckdb.connect(database=':memory:') 
 
 producer = Producer({
     "bootstrap.servers": KAFKA_BROKERS,
     "linger.ms": 50
 })
+
+clickhouse_client = ClickHouseClient(
+    host=CLICKHOUSE_HOST,
+    port=CLICKHOUSE_PORT,
+    user=CLICKHOUSE_USER,
+    password=CLICKHOUSE_PASSWORD,
+    database=CLICKHOUSE_DATABASE,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("system-failure-checker")
@@ -51,20 +58,6 @@ log = logging.getLogger("system-failure-checker")
 def _delivery_report(err, msg):
     if err:
         log.error("Kafka Delivery failed: %s", err)
-
-def init_duckdb_s3():
-    """Initialize S3 credentials and extensions once."""
-    log.info("Initializing DuckDB S3 Connection...")
-    db_con.execute("INSTALL httpfs; LOAD httpfs;")
-    db_con.execute(f"""
-        CREATE OR REPLACE SECRET (
-            TYPE S3,
-            KEY_ID '{AWS_ACCESS_KEY_ID}',
-            SECRET '{AWS_SECRET_ACCESS_KEY}',
-            REGION '{S3_REGION}',
-            URL_STYLE 'path'
-        );
-    """)
 
 def send_failure_notification(app_id, abnormal_services, start_dt, end_dt):
     if not DISCORD_WEBHOOK_URL: return
@@ -87,47 +80,44 @@ def send_failure_notification(app_id, abnormal_services, start_dt, end_dt):
 
 # ── Core Logic ──────────────────────────────────────────────────────────────
 def check_system_failures(start_dt, end_dt, record_timestamp):
-    """Query S3 data using the persistent global connection."""
+    """Query ClickHouse anomalies table."""
     try:
-        # Optimization: Use Hive Partitioning (date_part) to prune S3 files
-        start_date_str = start_dt.strftime("%Y-%m-%d")
-        end_date_str = end_dt.strftime("%Y-%m-%d")
         start_ts_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
         print(f"Querying spans from {start_ts_str} to {end_ts_str}...")
 
-        query = f"""
+        query = """
             SELECT
                 app_id,
                 service,
                 operation,
-                AVG(is_anomaly::INT) as abnormal_ratio
-            FROM read_parquet('s3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet', hive_partitioning = 1)
-            WHERE date_part BETWEEN '{start_date_str}' AND '{end_date_str}'
-              AND "timestamp" BETWEEN '{start_ts_str}'::TIMESTAMP AND '{end_ts_str}'::TIMESTAMP
+                AVG(is_anomaly) AS abnormal_ratio
+            FROM anomalies
+            WHERE timestamp >= %(start_dt)s AND timestamp < %(end_dt)s
             GROUP BY app_id, service, operation
-            HAVING SUM(is_anomaly::INT) > {MINIMUM_ANOMALY_SPANS}
+            HAVING SUM(is_anomaly) > %(min_anomaly_spans)s
         """
-        
-        # Retry on transient read errors (race condition: anomaly-detection
-        # service may be overwriting the parquet file on S3 mid-read).
-        result = db_con.cursor().execute(query).fetchdf()
+
+        params = {
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "min_anomaly_spans": MINIMUM_ANOMALY_SPANS,
+        }
+
+        result = clickhouse_client.query_dataframe(query, params=params)
 
         if result.empty:
             log.info("No anomalies found in window %s to %s", start_ts_str, end_ts_str)
             return
 
         failures = result[result['abnormal_ratio'] > FAILURE_THRESHOLD]
-
         if failures.empty:
             log.info("No failures above threshold in window %s to %s", start_ts_str, end_ts_str)
             return
 
-        # Group failures by app_id and send separate RCA tasks
         for app_id in failures['app_id'].unique():
             app_failures = failures[failures['app_id'] == app_id]
             abnormal_services = app_failures['service'].unique().tolist()
-
             log.warning("FAILURE DETECTED for app=%s: %s", app_id, abnormal_services)
             record = {
                 "app_id": app_id,
@@ -152,7 +142,6 @@ def check_current_failure():
 # ── Lifecycle ───────────────────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
-    init_duckdb_s3()
     scheduler.add_job(
         check_current_failure,
         trigger=IntervalTrigger(minutes=CHECK_INTERVAL_MINUTES),
@@ -167,7 +156,7 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     scheduler.shutdown()
-    db_con.close()
+    clickhouse_client.disconnect()
     log.info("Service shutdown.")
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
