@@ -17,6 +17,7 @@ import logging
 import boto3
 from urllib.parse import urlparse
 from performance_metrics import MetricsTracker
+from clickhouse_driver import Client as ClickHouseClient
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -24,15 +25,12 @@ KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:19092")
 INPUT_TOPIC = os.getenv("INPUT_TOPIC", "rca-task-data")
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "rca-service-group")
 
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
-S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 # Toggle detailed performance measurement (timing + metrics calculation)
-PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "true").lower() == "true"
+PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "false").lower() == "true"
 
 S3_KB_PATH = os.getenv("S3_KB_PATH", "s3://kltn-anomaly-dateset-1/knowledge_base.json")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -40,44 +38,29 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 LOKI_URL = os.getenv("LOKI_URL", "http://loki.loki.svc.cluster.local:3100")
 LLM_N_SAMPLES = int(os.getenv("LLM_N_SAMPLES", "3"))
 
+# ClickHouse config
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "9000"))
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
+CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("trace-rca-service")
-# Persistent global DuckDB connection
-db_con = duckdb.connect(database=':memory:') 
+
+clickhouse_client = ClickHouseClient(
+    host=CLICKHOUSE_HOST,
+    port=CLICKHOUSE_PORT,
+    user=CLICKHOUSE_USER,
+    password=CLICKHOUSE_PASSWORD,
+    database=CLICKHOUSE_DATABASE,
+)
 
 # ── Setup ──────────────────────────────────────────────────────────
-
-def init_duckdb_s3():
-    """Initialize S3 credentials and extensions once."""
-    log.info("Initializing DuckDB S3 Connection...")
-    db_con.execute("INSTALL httpfs; LOAD httpfs;")
-    db_con.execute(f"""
-        CREATE OR REPLACE SECRET (
-            TYPE S3,
-            KEY_ID '{AWS_ACCESS_KEY_ID}',
-            SECRET '{AWS_SECRET_ACCESS_KEY}',
-            REGION '{S3_REGION}',
-            URL_STYLE 'path'
-        );
-    """)
-    db_con.execute("SET threads TO 8;")
-
-    # Run a warm-up query
-    run_warmup_query()
-
-def run_warmup_query():
-    # Use UTC-aware timestamps to match most telemetry pipelines
-
-    warm_start = datetime.fromisoformat("2026-04-30T16:07:15.518782")
-    warm_end = datetime.fromisoformat("2026-04-30T16:10:15.518782")
-
-    # Warm-up query: similar shape to main query, but bounded + lightweight
-    query_spans_by_timestamp(warm_start, warm_end, app_id="k8s-repo-application")
-
 def fetch_s3_json(s3_path):
     """
     Fetches a JSON object from S3 and converts it to a Python object.
@@ -137,54 +120,29 @@ def fetch_s3_json(s3_path):
 
 def query_spans_by_timestamp(start_dt, end_dt, app_id: str = None):
     """
-    Query spans from S3 within the given timestamp range.
-    If app_id is provided, filter by app_id.
+    Query spans from ClickHouse within the given timestamp range.
     Returns DataFrame with span data.
     """
     try:
-        # Build app_id filter clause
-        app_filter = "AND app_id = ?" if app_id else ""
+        start_ts_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Query spans within timestamp range
+        app_filter = "AND app_id = %(app_id)s" if app_id else ""
         query = f"""
-            WITH anomalous_traces AS (
-                SELECT DISTINCT trace_id
-                FROM read_parquet(
-                    's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet',
-                    hive_partitioning = true
-                )
-                WHERE date_part BETWEEN ? AND ?
-                AND "timestamp" BETWEEN ? AND ?
-                AND is_anomaly = TRUE
-                {app_filter}
-            )
-            SELECT s.*
-            FROM read_parquet(
-                's3://{S3_BUCKET}/anomalies/data.parquet/date_part=*/*.parquet',
-                hive_partitioning = true
-            ) s
-            JOIN anomalous_traces a
-            ON s.trace_id = a.trace_id
-            WHERE s.date_part BETWEEN ? AND ?
+            SELECT *
+            FROM anomalies
+            WHERE timestamp BETWEEN %(start_ts)s AND %(end_ts)s
             {app_filter}
         """
 
-        # Pass parameters safely to DuckDB
-        params = [
-            start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"),
-            start_dt, end_dt,
-        ]
+        params = {
+            "start_ts": start_ts_str,
+            "end_ts": end_ts_str,
+        }
         if app_id:
-            params.append(app_id)
-        params.extend([
-            start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
-        ])
-        if app_id:
-            params.append(app_id)
+            params["app_id"] = app_id
 
-        # Retry on transient read errors (race condition: anomaly-detection
-        # service may be overwriting the parquet file on S3 mid-read).
-        result_df = db_con.cursor().execute(query, params).fetchdf()
+        result_df = clickhouse_client.query_dataframe(query, params=params)
         log.info(f"Found {len(result_df)} spans between {start_dt} and {end_dt}")
         return result_df
 
@@ -255,9 +213,6 @@ def main():
     })
     consumer.subscribe([INPUT_TOPIC])
 
-    # Initialize DuckDB S3 connection (must be before KB fetch for S3 fallback)
-    init_duckdb_s3()
-
     # Load Knowledge Base from MLflow (falls back to S3_KB_PATH)
     kb = fetch_s3_json(S3_KB_PATH)
     print(f"Loaded KB with {len(kb)} entries")
@@ -269,9 +224,8 @@ def main():
     metrics_tracker = MetricsTracker()
 
     # ── Start REST API server in background thread ────────────────
-    api_module.set_db_con(db_con)
     threading.Thread(
-        target=lambda: uvicorn.run(api_module.app, host="0.0.0.0", port=8080, log_level="warning"),
+        target=lambda: uvicorn.run(api_module.app, host="0.0.0.0", port=8082, log_level="warning"),
         daemon=True,
     ).start()
     log.info("API server started on port 8080")
@@ -362,7 +316,7 @@ def main():
         log.info("Shutting down RCA Service...")
     finally:
         consumer.close()
-        db_con.close()
+        clickhouse_client.disconnect()
 
 if __name__ == "__main__":
     main()

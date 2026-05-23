@@ -13,7 +13,6 @@ import signal
 import logging
 import time
 import threading
-from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import duckdb
@@ -28,6 +27,8 @@ from model_registry import ModelRegistry
 from transformer_ae.evaluate import preprocess_test_df, build_sequences
 from common.util import map_status_group
 from common.performance_metrics import MetricsTracker
+from clickhouse_driver import Client as ClickHouseClient
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -43,7 +44,7 @@ DEFAULT_THRESHOLD = float(os.getenv("ANOMALY_THRESHOLD", "0.33"))
 
 # Write buffer settings
 FLUSH_ROW_THRESHOLD = int(os.getenv("FLUSH_ROW_THRESHOLD", "500"))
-FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "60"))
+FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "5"))
 
 # S3 config
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
@@ -56,6 +57,13 @@ PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "false").lower(
 # Health server
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8080"))
 
+# ClickHouse config
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "9000"))
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
+CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -64,6 +72,16 @@ log = logging.getLogger("anomaly-detection")
 
 # Persistent global DuckDB connection
 db_con = duckdb.connect(database=':memory:') 
+
+# ClickHouse client (initialized in main)
+clickhouse_client = ClickHouseClient(
+    host=CLICKHOUSE_HOST,
+    port=CLICKHOUSE_PORT,
+    user=CLICKHOUSE_USER,
+    password=CLICKHOUSE_PASSWORD,
+    database=CLICKHOUSE_DATABASE,
+)
+
 # Initialise metrics tracker
 metrics_tracker = MetricsTracker()
 
@@ -148,15 +166,7 @@ def write_to_s3(result_df: pd.DataFrame):
     write_con = duckdb.connect(database=":memory:")
     try:
         # Debug: print a few app_id values before DuckDB write
-        if "app_id" in result_df.columns:
-            sample_app_ids = result_df["app_id"].head(10).tolist()
-            log.info("Sample app_id values (first 10): %s", sample_app_ids)
-
-            # Optional: also inspect null / empty cases
-            null_count = result_df["app_id"].isna().sum()
-            empty_count = (result_df["app_id"].astype(str).str.strip() == "").sum()
-            log.info("app_id null_count=%d, empty_count=%d", null_count, empty_count)
-        else:
+        if "app_id" not in result_df.columns:
             log.error("app_id column missing before S3 write")
         
         write_con.execute("INSTALL httpfs; LOAD httpfs;")
@@ -195,6 +205,88 @@ def write_to_s3(result_df: pd.DataFrame):
     finally:
         write_con.close()
 
+# ── ClickHouse ───────────────────────────────────────────────────────
+
+def init_clickhouse():
+    """Initialize ClickHouse connection."""
+    log.info("Initializing ClickHouse Connection...")
+    # Tạo bảng nếu chưa có
+    clickhouse_client.execute("""
+        CREATE TABLE IF NOT EXISTS anomalies (
+            timestamp        DateTime,
+            app_id           String,
+            trace_id         String,
+            span_id          String,
+            parent_span_id   String,
+            service          String,
+            operation        String,
+            http_status      String,
+            duration_ns      Int64,
+            kind             String,
+            span_status      String,
+            anomaly_score    Float64,
+            is_anomaly       UInt8
+        )
+        ENGINE = MergeTree()
+        ORDER BY (timestamp, app_id)
+        TTL timestamp + INTERVAL 1 DAY
+    """)
+
+def write_to_clickhouse(result_df: pd.DataFrame):
+    """Write anomaly results to ClickHouse."""
+    if result_df.empty:
+        return
+
+    try:
+        if "raw_app_id" not in result_df.columns:
+            log.error("Missing app_id column")
+            return
+
+        timestamps = pd.to_datetime(
+            result_df["startTime"].astype("int64"),
+            unit="ns"
+        )
+
+        data = list(zip(
+            timestamps,
+            result_df["raw_app_id"].astype(str),
+            result_df["traceId"].astype(str),
+            result_df["spanId"].astype(str),
+            result_df["parentSpanId"].fillna("").astype(str),
+            result_df["raw_service"].astype(str),
+            result_df["raw_operation"].astype(str),
+            result_df["http_status"].astype(str),
+            result_df["duration_raw"].astype("int64"),
+            result_df["kind"].astype(str),
+            result_df["span_status"].astype(str),
+            result_df["anomaly_score"].astype(float),
+            result_df["is_anomaly"].astype("uint8"),
+        ))
+
+        clickhouse_client.execute("""
+            INSERT INTO anomalies (
+                timestamp,
+                app_id,
+                trace_id,
+                span_id,
+                parent_span_id,
+                service,
+                operation,
+                http_status,
+                duration_ns,
+                kind,
+                span_status,
+                anomaly_score,
+                is_anomaly
+            ) VALUES
+        """, data)
+
+        log.info("Inserted %d anomaly records to clickhouse", len(data))
+
+    except Exception:
+        log.exception("Failed to write anomalies to ClickHouse")
+        raise
+
 # ── Per-app batch processing ──────────────────────────────────────────────────
 
 def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -207,7 +299,7 @@ def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
     log.debug("Processing %d records for app_id=%s with model version=%s",
               len(df), app_id, app_model.version)
 
-    df = preprocess_test_df(df.copy(), app_model.encoders, app_model.scalers)
+    df = preprocess_test_df(df, app_model.encoders, app_model.scalers)
 
     seq_len = 20
     metric_cols = ["duration"]
@@ -265,15 +357,15 @@ def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
                     else:
                         df.at[row, "anomaly_score"] = max(df.at[row, "anomaly_score"], score)
 
-    df["is_anomaly"] = df["anomaly_score"] > app_model.threshold
+    # df["is_anomaly"] = df["anomaly_score"] > app_model.threshold # Need to check app_model.threshold as is_anomaly is always false
+    df["is_anomaly"] = df["anomaly_score"] > DEFAULT_THRESHOLD
 
     result_df = df.dropna(subset=["anomaly_score"]).copy()
     if result_df.empty:
         return pd.DataFrame()
 
-    anomaly_count = result_df["is_anomaly"].sum()
-    log.info("app_id=%s: %d records → %d scored → %d anomalies (threshold=%.4f)",
-             app_id, len(df), len(result_df), anomaly_count, app_model.threshold)
+    log.info("app_id=%s: %d records → %d scored → threshold=%.4f",
+             app_id, len(df), len(result_df), app_model.threshold)
 
     return result_df
 
@@ -326,13 +418,26 @@ def process_batch(messages: list) -> pd.DataFrame:
 # ── Main consumer loop ───────────────────────────────────────────────────────
 
 def flush_buffer(buffer: list[pd.DataFrame]) -> int:
-    """Concatenate buffered DataFrames and write to S3."""
+    """Concatenate buffered DataFrames and write to S3 and ClickHouse in parallel."""
     if not buffer:
         return 0
+    
     combined = pd.concat(buffer, ignore_index=True)
-    write_to_s3(combined)
-    return len(combined)
+    write_to_clickhouse(combined)
 
+    # with ThreadPoolExecutor(max_workers=2) as executor:
+    #     futures = {
+    #         executor.submit(write_to_s3, combined): "S3",
+    #         executor.submit(write_to_clickhouse, combined): "ClickHouse",
+    #     }
+    #     for future in as_completed(futures):
+    #         name = futures[future]
+    #         try:
+    #             future.result()
+    #         except Exception as e:
+    #             log.error("Failed to write to %s: %s", name, e)
+
+    return len(combined)
 
 def main():
     log.info("Anomaly Detection Service (Multi-Model) starting…")
@@ -353,6 +458,7 @@ def main():
     )
 
     init_duckdb_s3()
+    init_clickhouse()
 
     total_processed = 0
     write_buffer: list[pd.DataFrame] = []
@@ -423,7 +529,7 @@ def main():
             except Exception as e:
                 log.error("Error in final flush: %s", e, exc_info=True)
         consumer.close()
-        db_con.close()
+        clickhouse_client.disconnect()
         log.info("Cache stats at shutdown: %s", model_registry.get_cache_stats())
         log.info("Shutdown complete. total_processed=%d", total_processed)
 

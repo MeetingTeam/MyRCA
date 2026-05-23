@@ -71,7 +71,13 @@ ingestor:
 
     env: []
 
-    resources: {}
+    resources:
+      requests:
+        cpu: 50m
+        memory: 300Mi
+      limits:
+        cpu: 50m
+        memory: 300Mi
 
     livenessProbe:
       httpGet:
