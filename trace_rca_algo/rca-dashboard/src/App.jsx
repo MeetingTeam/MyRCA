@@ -9,6 +9,7 @@ import Sidebar from './components/sidebar'
 import PlaceholderPage from './components/placeholder-page'
 import GrafanaLinks from './components/grafana-links'
 import ApiKeysPage from './components/api-keys-page'
+import RolesUsersPage from './components/roles-users-page'
 import { fetchApplications } from './api'
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
@@ -137,12 +138,7 @@ function Dashboard() {
             <Routes>
               <Route path="/" element={<IncidentList />} />
               <Route path="/incidents/:id" element={<IncidentDetail />} />
-              <Route path="/users" element={
-                <PlaceholderPage
-                  title="Roles & Users"
-                  description="Manage user roles and permissions for RBAC access control."
-                />
-              } />
+              <Route path="/users" element={<RolesUsersPage />} />
               <Route path="/projects" element={
                 <PlaceholderPage
                   title="Projects"
