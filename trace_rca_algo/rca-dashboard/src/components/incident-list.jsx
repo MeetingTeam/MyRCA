@@ -5,7 +5,7 @@ import { useAppFilter } from '../App'
 import SeverityBadge from './severity-badge'
 
 export default function IncidentList() {
-  const { selectedApps } = useAppFilter()
+  const { applications, selectedApps, setSelectedApps, loading: appsLoading, error: appsError } = useAppFilter()
   const [incidents, setIncidents] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -105,9 +105,52 @@ export default function IncidentList() {
     ESCALATE: 'bg-red-600 text-red-100',
   }
 
+  const toggleApp = (appId) => {
+    setSelectedApps(prev =>
+      prev.includes(appId)
+        ? prev.filter(a => a !== appId)
+        : [...prev, appId]
+    )
+  }
+
+  const clearApps = () => setSelectedApps([])
+
   return (
     <div>
       <h1 className="text-2xl font-bold mb-4">Incidents</h1>
+
+      {/* App Filter */}
+      <div className="bg-dark-800 rounded-lg border border-gray-700 p-4 mb-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-gray-500 uppercase">Filter by App:</span>
+          {appsLoading && <span className="text-xs text-gray-400">Loading...</span>}
+          {appsError && <span className="text-xs text-red-400">Error loading apps</span>}
+          {!appsLoading && !appsError && applications.length === 0 && (
+            <span className="text-xs text-gray-400">No applications found</span>
+          )}
+          {applications.map(appId => (
+            <button
+              key={appId}
+              onClick={() => toggleApp(appId)}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition ${
+                selectedApps.includes(appId)
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-dark-900 text-gray-400 hover:text-white hover:bg-dark-700'
+              }`}
+            >
+              {appId}
+            </button>
+          ))}
+          {selectedApps.length > 0 && (
+            <button
+              onClick={clearApps}
+              className="text-xs text-gray-400 hover:text-white ml-2"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
 
       {/* Filter Bar */}
       <div className="bg-dark-800 rounded-lg border border-gray-700 p-4 mb-4">

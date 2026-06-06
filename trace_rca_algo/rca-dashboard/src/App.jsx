@@ -5,6 +5,9 @@ import { AuthProvider, useAuth } from './auth-context'
 import IncidentList from './components/incident-list'
 import IncidentDetail from './components/incident-detail'
 import LoginPage from './components/login-page'
+import Sidebar from './components/sidebar'
+import PlaceholderPage from './components/placeholder-page'
+import GrafanaLinks from './components/grafana-links'
 import { fetchApplications } from './api'
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
@@ -61,15 +64,34 @@ function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [searchParams, setSearchParams] = useSearchParams()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    const saved = localStorage.getItem('sidebar-collapsed')
+    return saved === 'true'
+  })
+
+  // Persist sidebar state
+  useEffect(() => {
+    localStorage.setItem('sidebar-collapsed', sidebarCollapsed)
+  }, [sidebarCollapsed])
+
+  // Auto-collapse on mobile
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth < 768) {
+        setSidebarCollapsed(true)
+      }
+    }
+    window.addEventListener('resize', handleResize)
+    handleResize()
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
 
   // Load applications on mount
   useEffect(() => {
     fetchApplications()
       .then(apps => {
-        // Ensure apps is an array of strings
         const appList = Array.isArray(apps) ? apps.filter(a => typeof a === 'string') : []
         setApplications(appList)
-        // Restore selected apps from URL
         const urlApps = searchParams.get('apps')
         if (urlApps) {
           const parsed = urlApps.split(',').filter(a => a && appList.includes(a))
@@ -90,21 +112,11 @@ function Dashboard() {
     setSearchParams(searchParams, { replace: true })
   }, [selectedApps])
 
-  const toggleApp = (appId) => {
-    setSelectedApps(prev =>
-      prev.includes(appId)
-        ? prev.filter(a => a !== appId)
-        : [...prev, appId]
-    )
-  }
-
-  const clearApps = () => setSelectedApps([])
-
   return (
     <AppFilterContext.Provider value={{ applications, selectedApps, setSelectedApps, loading, error }}>
-      <div className="min-h-screen">
+      <div className="min-h-screen flex flex-col">
         <nav className="bg-dark-800 border-b border-gray-700 px-6 py-3">
-          <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <Link to="/" className="text-lg font-bold text-white hover:text-blue-400">
                 MyRCA Dashboard
@@ -113,45 +125,39 @@ function Dashboard() {
             </div>
             <UserMenu />
           </div>
-
-          {/* App filter chips */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-gray-500 uppercase">Apps:</span>
-            {loading && <span className="text-xs text-gray-400">Loading...</span>}
-            {error && <span className="text-xs text-red-400">Error loading apps</span>}
-            {!loading && !error && applications.length === 0 && (
-              <span className="text-xs text-gray-400">No applications found</span>
-            )}
-            {applications.map(appId => (
-              <button
-                key={appId}
-                onClick={() => toggleApp(appId)}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition ${
-                  selectedApps.includes(appId)
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-dark-900 text-gray-400 hover:text-white hover:bg-dark-700'
-                }`}
-              >
-                {appId}
-              </button>
-            ))}
-            {selectedApps.length > 0 && (
-              <button
-                onClick={clearApps}
-                className="text-xs text-gray-400 hover:text-white ml-2"
-              >
-                Clear
-              </button>
-            )}
-          </div>
         </nav>
 
-        <main className="max-w-7xl mx-auto px-6 py-6">
-          <Routes>
-            <Route path="/" element={<IncidentList />} />
-            <Route path="/incidents/:id" element={<IncidentDetail />} />
-          </Routes>
-        </main>
+        <div className="flex flex-1">
+          <Sidebar
+            collapsed={sidebarCollapsed}
+            onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+          />
+          <main className="flex-1 p-6 overflow-auto">
+            <Routes>
+              <Route path="/" element={<IncidentList />} />
+              <Route path="/incidents/:id" element={<IncidentDetail />} />
+              <Route path="/users" element={
+                <PlaceholderPage
+                  title="Roles & Users"
+                  description="Manage user roles and permissions for RBAC access control."
+                />
+              } />
+              <Route path="/projects" element={
+                <PlaceholderPage
+                  title="Projects"
+                  description="Organize and manage multiple applications and their configurations."
+                />
+              } />
+              <Route path="/grafana" element={<GrafanaLinks />} />
+              <Route path="/api-keys" element={
+                <PlaceholderPage
+                  title="API Keys"
+                  description="Configure API keys for LLM reasoning models (Claude, GPT, etc.)."
+                />
+              } />
+            </Routes>
+          </main>
+        </div>
       </div>
     </AppFilterContext.Provider>
   )
