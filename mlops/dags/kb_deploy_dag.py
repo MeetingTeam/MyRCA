@@ -1,5 +1,5 @@
 from airflow import DAG
-from airflow.utils.dates import days_ago
+import pendulum
 from airflow.models.param import Param
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from kubernetes.client import models as k8s
@@ -14,7 +14,7 @@ RCA_SERVICE_NAMESPACE = "rca"
 
 with DAG(
     dag_id='kb_deploy_dag',
-    start_date=days_ago(1),
+    start_date=pendulum.today('UTC').add(days=-1),
     catchup=False,
     tags=['mlops', 'kb_deploy'],
     params={

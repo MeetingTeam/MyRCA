@@ -1,3 +1,5 @@
-apache-airflow
+apache-airflow-providers-cncf-kubernetes>=10.0.0
+apache-airflow-providers-amazon>=9.0.0
 kubernetes
 mlflow-skinny
+pendulum

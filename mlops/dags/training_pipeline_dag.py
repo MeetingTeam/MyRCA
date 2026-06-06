@@ -118,7 +118,7 @@ with DAG(
     dag_id="training_pipeline",
     default_args=default_args,
     description="MLOps training pipeline: K8s for lightweight tasks, AWS Batch for GPU training",
-    schedule_interval=None,
+    schedule=None,
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["mlops", "training", "batch"],

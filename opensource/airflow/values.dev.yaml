@@ -1,6 +1,7 @@
 config:
   api:
     auth_backends: airflow.api.auth.backend.basic_auth
+    workers: "2"
   core:
     dag_discovery_safe_mode: "False"
     dags_folder: /opt/airflow/dags
@@ -12,7 +13,6 @@ config:
   webserver:
     web_server_master_timeout: "300"
     web_server_worker_timeout: "300"
-    workers: "2"
 
 dags:
   gitSync:
@@ -54,12 +54,12 @@ flower:
 
 images:
   airflow:
-    repository: hungtran679/my-airflow
-    tag: latest
+    repository: asdads6495/my-airflow
+    tag: "3.0.6"
     pullPolicy: Always
   pod_template:
-    repository: hungtran679/my-airflow
-    tag: latest
+    repository: asdads6495/my-airflow
+    tag: "3.0.6"
     pullPolicy: Always
 
 logs:
@@ -115,6 +115,21 @@ statsd:
   enabled: false
 triggerer:
   enabled: false
+
+apiServer:
+  service:
+    type: NodePort
+    ports:
+    - name: airflow-ui
+      port: 8080
+      nodePort: 30380
+  defaultUser:
+    enabled: true
+    username: admin
+    password: admin
+    email: admin@example.com
+    firstName: Admin
+    lastName: User
 
 webserver:
   args:

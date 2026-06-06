@@ -37,7 +37,7 @@ with DAG(
     dag_id="model_deploy",
     default_args=default_args,
     description="Deploy a trained model version to the anomaly detection service",
-    schedule_interval=None,  # Manual trigger only
+    schedule=None,  # Manual trigger only
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["mlops", "deploy"],

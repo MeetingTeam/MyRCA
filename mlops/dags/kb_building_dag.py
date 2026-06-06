@@ -1,7 +1,7 @@
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 import os
-from airflow.utils.dates import days_ago
+import pendulum
 from datetime import datetime
 from kubernetes.client import models as k8s
 
@@ -10,8 +10,8 @@ KB_BUILDER_IMAGE="hungtran679/kb_builder"
 # --- DAG Definition ---
 with DAG(
     'kb_building_dag',
-    schedule_interval='@weekly',
-    start_date=days_ago(1),
+    schedule='@weekly',
+    start_date=pendulum.today('UTC').add(days=-1),
     catchup=False,
     tags=['mlops', 'kb_building']
 ) as dag:
