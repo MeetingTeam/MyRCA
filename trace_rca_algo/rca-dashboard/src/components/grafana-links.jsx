@@ -1,6 +1,6 @@
 import { ExternalLink, Database, FileText, Activity } from 'lucide-react'
 
-const GRAFANA_BASE_URL = import.meta.env.VITE_GRAFANA_URL || 'http://grafana.local'
+const GRAFANA_BASE_URL = import.meta.env.VITE_GRAFANA_URL || 'http://34.226.226.116:30300'
 
 const dashboards = [
   {
@@ -8,18 +8,21 @@ const dashboards = [
     name: 'Loki Logs',
     description: 'Application logs and error tracking',
     icon: FileText,
+    path: '/d/myrca-loki-logs/loki-e28094-logs-overview',
   },
   {
     id: 'clickhouse',
-    name: 'ClickHouse Metrics',
-    description: 'Database performance and query analytics',
+    name: 'ClickHouse Anomalies',
+    description: 'Database performance and anomaly analytics',
     icon: Database,
+    path: '/d/myrca-clickhouse-anomalies/clickhouse-anomalies-overview',
   },
   {
     id: 'tempo',
     name: 'Tempo Traces',
     description: 'Distributed tracing and latency analysis',
     icon: Activity,
+    path: '/d/myrca-tempo-traces/tempo-e28094-traces-overview',
   },
 ]
 
@@ -35,7 +38,7 @@ export default function GrafanaLinks() {
         {dashboards.map(dashboard => (
           <a
             key={dashboard.id}
-            href={`${GRAFANA_BASE_URL}/d/${dashboard.id}`}
+            href={`${GRAFANA_BASE_URL}${dashboard.path}`}
             target="_blank"
             rel="noopener noreferrer"
             className="bg-dark-800 border border-gray-700 rounded-lg p-6 hover:border-blue-500 hover:bg-dark-700 transition group"
