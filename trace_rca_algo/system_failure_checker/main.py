@@ -3,7 +3,6 @@ import logging
 import json
 import time
 import requests
-import duckdb
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI

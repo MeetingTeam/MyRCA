@@ -4,7 +4,7 @@ Anomaly Detection Serving API (Multi-Model)
 Kafka batch consumer with per-app model routing:
   1. Consumes preprocessed span records from Redpanda topic `preprocess-data`
   2. Routes inference to app-specific models via ModelRegistry
-  3. Writes results (Parquet, partitioned by date) to AWS S3 via DuckDB
+  3. Writes results to ClickHouse (tiered storage: EBS hot → S3 cold)
 """
 
 import json
@@ -15,7 +15,6 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-import duckdb
 import numpy as np
 import pandas as pd
 import torch
@@ -28,7 +27,6 @@ from transformer_ae.evaluate import preprocess_test_df, build_sequences
 from common.util import map_status_group
 from common.performance_metrics import MetricsTracker
 from clickhouse_driver import Client as ClickHouseClient
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -46,11 +44,9 @@ DEFAULT_THRESHOLD = float(os.getenv("ANOMALY_THRESHOLD", "0.33"))
 FLUSH_ROW_THRESHOLD = int(os.getenv("FLUSH_ROW_THRESHOLD", "500"))
 FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "5"))
 
-# S3 config
+# S3 config (for model registry)
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 # Toggle detailed performance measurement (timing + metrics calculation)
 PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "false").lower() == "true"
@@ -69,9 +65,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("anomaly-detection")
-
-# Persistent global DuckDB connection
-db_con = duckdb.connect(database=':memory:') 
 
 # ClickHouse client (initialized in main)
 clickhouse_client = ClickHouseClient(
@@ -142,68 +135,6 @@ def start_health_server(port: int):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     log.info("Health server started on port %d", port)
-
-# ── DuckDB ───────────────────────────────────────────────────────
-
-def init_duckdb_s3():
-    """Initialize S3 credentials and extensions once."""
-    log.info("Initializing DuckDB S3 Connection...")
-    db_con.execute("INSTALL httpfs; LOAD httpfs;")
-    db_con.execute(f"""
-        CREATE OR REPLACE SECRET (
-            TYPE S3,
-            KEY_ID '{AWS_ACCESS_KEY_ID}',
-            SECRET '{AWS_SECRET_ACCESS_KEY}',
-            REGION '{S3_REGION}'
-        );
-    """)
-
-def write_to_s3(result_df: pd.DataFrame):
-    """Write the result DataFrame to S3 as Parquet."""
-    if result_df.empty:
-        return
-
-    write_con = duckdb.connect(database=":memory:")
-    try:
-        # Debug: print a few app_id values before DuckDB write
-        if "app_id" not in result_df.columns:
-            log.error("app_id column missing before S3 write")
-        
-        write_con.execute("INSTALL httpfs; LOAD httpfs;")
-        write_con.execute(f"""
-            CREATE OR REPLACE SECRET (
-                TYPE S3,
-                KEY_ID '{AWS_ACCESS_KEY_ID}',
-                SECRET '{AWS_SECRET_ACCESS_KEY}',
-                REGION '{S3_REGION}'
-            );
-        """)
-        write_con.register("result_df", result_df)
-        write_con.execute(f"""
-            COPY (
-                SELECT
-                    make_timestamp(startTime::BIGINT // 1000) AS timestamp,
-                    app_id,
-                    traceId AS trace_id,
-                    spanId AS span_id,
-                    parentSpanId AS parent_span_id,
-                    raw_service AS service,
-                    raw_operation AS operation,
-                    http_status,
-                    duration_raw AS duration_ns,
-                    kind,
-                    span_status,
-                    anomaly_score,
-                    is_anomaly,
-                    current_date AS date_part
-                FROM result_df
-            )
-            TO 's3://{S3_BUCKET}/anomalies/data.parquet'
-            (FORMAT PARQUET, PARTITION_BY (date_part), APPEND);
-        """)
-        log.info("Wrote %d records to s3://%s/anomalies/", len(result_df), S3_BUCKET)
-    finally:
-        write_con.close()
 
 # ── ClickHouse ───────────────────────────────────────────────────────
 
@@ -457,7 +388,6 @@ def main():
         INPUT_TOPIC, CONSUMER_GROUP, BATCH_SIZE, FLUSH_ROW_THRESHOLD, FLUSH_INTERVAL_SECONDS,
     )
 
-    init_duckdb_s3()
     init_clickhouse()
 
     total_processed = 0

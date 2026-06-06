@@ -1,7 +1,7 @@
 """
 Step 2: Preprocessing
 ─────────────────────
-Reads raw span data from S3, applies encoding/scaling (reusing logic from
+Reads anomaly data from ClickHouse, applies encoding/scaling (reusing logic from
 model/transformer_ae/train.py:preprocess_df), splits 70/30, and saves
 train.parquet + test.parquet + encoders/scalers to S3.
 """
@@ -19,7 +19,8 @@ from sklearn.preprocessing import StandardScaler
 
 from common.safe_label_encoder import SafeLabelEncoder
 from common.util import map_status_group
-from tasks.s3_utils import S3_BUCKET, get_duckdb_connection, read_parquet_from_s3, write_parquet_to_s3, s3_path
+from tasks.s3_utils import S3_BUCKET, write_parquet_to_s3, s3_path
+from tasks.clickhouse_utils import load_anomaly_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("preprocessing")
@@ -59,19 +60,11 @@ def preprocess_df(df):
 
 
 def load_training_data(window_days: int) -> pd.DataFrame:
-    """Load anomaly data from last N days."""
-    cutoff_epoch = (datetime.now(timezone.utc) - timedelta(days=window_days)).timestamp()
+    """Load anomaly data from ClickHouse for the last N days.
 
-    con = get_duckdb_connection()
-    df = con.execute(f"""
-        SELECT * FROM read_parquet(
-            's3://{S3_BUCKET}/anomalies/data.parquet/**/*.parquet',
-            hive_partitioning=0, union_by_name=1
-        )
-        WHERE epoch(timestamp) >= {cutoff_epoch}
-    """).fetchdf()
-    con.close()
-    return df
+    ClickHouse auto-routes queries to EBS (hot) or S3 (cold) storage.
+    """
+    return load_anomaly_data(window_days)
 
 
 def run():

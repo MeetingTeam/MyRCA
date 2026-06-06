@@ -9,7 +9,6 @@ import time
 import threading
 from confluent_kafka import Consumer, KafkaError, KafkaException
 import json
-import duckdb
 import uvicorn
 from datetime import datetime, timezone
 import requests

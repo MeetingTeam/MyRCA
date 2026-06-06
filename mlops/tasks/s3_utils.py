@@ -1,72 +1,31 @@
 """
-DuckDB S3 helpers for the MLOps pipeline.
-Reuses the pattern from anomaly_detection_service.py.
+S3 utilities for the MLOps pipeline.
+Uses boto3 + pyarrow for Parquet operations (DuckDB removed).
 """
-
+import io
 import os
 from datetime import datetime, timedelta, timezone
 
-import duckdb
 import boto3
-
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 DRIFT_WINDOW_MINUTES = int(os.getenv("DRIFT_WINDOW_MINUTES", "10"))
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
-S3_USE_SSL = os.getenv("S3_USE_SSL", "true").lower() == "true"
+
+_s3_client = None
 
 
-def _get_aws_credentials() -> tuple[str, str, str]:
-    """Get AWS credentials from boto3 session (supports IAM roles, env vars, etc.)."""
-    session = boto3.Session()
-    creds = session.get_credentials()
-    if creds is None:
-        return "", "", ""
-    frozen = creds.get_frozen_credentials()
-    return frozen.access_key or "", frozen.secret_key or "", frozen.token or ""
-
-
-def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
-    """Return a DuckDB connection with S3/httpfs configured."""
-    access_key, secret_key, session_token = _get_aws_credentials()
-
-    con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    con.execute(f"""
-        SET s3_endpoint='{S3_ENDPOINT}';
-        SET s3_region='{S3_REGION}';
-        SET s3_access_key_id='{access_key}';
-        SET s3_secret_access_key='{secret_key}';
-        SET s3_session_token='{session_token}';
-        SET s3_use_ssl={'true' if S3_USE_SSL else 'false'};
-        SET s3_url_style='path';
-    """)
-    return con
-
-
-def read_parquet_from_s3(s3_path: str, where_clause: str = "") -> "pd.DataFrame":
-    """Read a Parquet dataset from S3 via DuckDB and return a pandas DataFrame."""
-    import pandas as pd
-    con = get_duckdb_connection()
-    query = f"SELECT * FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=1)"
-    if where_clause:
-        query += f" WHERE {where_clause}"
-    df = con.execute(query).fetchdf()
-    con.close()
-    return df
-
-
-def write_parquet_to_s3(df: "pd.DataFrame", s3_path: str):
-    """Write a pandas DataFrame to S3 as Parquet via DuckDB."""
-    con = get_duckdb_connection()
-    con.register("df_to_write", df)
-    con.execute(f"""
-        COPY df_to_write TO '{s3_path}'
-        (FORMAT PARQUET);
-    """)
-    con.close()
+def get_s3_client():
+    """Return a boto3 S3 client (cached)."""
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3", region_name=S3_REGION)
+    return _s3_client
 
 
 def s3_path(relative: str) -> str:
@@ -74,23 +33,59 @@ def s3_path(relative: str) -> str:
     return f"s3://{S3_BUCKET}/{relative}"
 
 
-def get_s3_client():
-    """Return a boto3 S3 client configured from env vars."""
-    return boto3.client("s3", region_name=S3_REGION)
+def read_parquet_from_s3(s3_uri: str) -> pd.DataFrame:
+    """Read a Parquet file from S3 and return a pandas DataFrame.
+
+    Args:
+        s3_uri: Full S3 URI (s3://bucket/key) or just the key
+    """
+    if s3_uri.startswith("s3://"):
+        parts = s3_uri[5:].split("/", 1)
+        bucket = parts[0]
+        key = parts[1] if len(parts) > 1 else ""
+    else:
+        bucket = S3_BUCKET
+        key = s3_uri
+
+    client = get_s3_client()
+    response = client.get_object(Bucket=bucket, Key=key)
+    buffer = io.BytesIO(response["Body"].read())
+    return pd.read_parquet(buffer)
+
+
+def write_parquet_to_s3(df: pd.DataFrame, s3_uri: str):
+    """Write a pandas DataFrame to S3 as Parquet.
+
+    Args:
+        df: DataFrame to write
+        s3_uri: Full S3 URI (s3://bucket/key) or just the key
+    """
+    if s3_uri.startswith("s3://"):
+        parts = s3_uri[5:].split("/", 1)
+        bucket = parts[0]
+        key = parts[1] if len(parts) > 1 else ""
+    else:
+        bucket = S3_BUCKET
+        key = s3_uri
+
+    buffer = io.BytesIO()
+    df.to_parquet(buffer, index=False)
+    buffer.seek(0)
+
+    client = get_s3_client()
+    client.put_object(Bucket=bucket, Key=key, Body=buffer.getvalue())
 
 
 def list_partition_dirs(prefix: str) -> list[str]:
-    """List hive partition directories under a prefix using boto3.
+    """List hive partition directories under a prefix.
 
     Returns partition values (e.g. ['2026-03-22', '2026-03-23']).
-    Much faster than DuckDB glob for buckets with many small files.
     """
     client = get_s3_client()
     paginator = client.get_paginator("list_objects_v2")
     partitions = set()
     for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix, Delimiter="/"):
         for cp in page.get("CommonPrefixes", []):
-            # Extract partition value from "anomalies/data.parquet/date_part=2026-03-22/"
             part_dir = cp["Prefix"].rstrip("/").split("/")[-1]
             if "=" in part_dir:
                 partitions.add(part_dir.split("=", 1)[1])
@@ -98,7 +93,7 @@ def list_partition_dirs(prefix: str) -> list[str]:
 
 
 def list_s3_keys(prefix: str) -> list[str]:
-    """List all object keys under a prefix using boto3."""
+    """List all object keys under a prefix."""
     client = get_s3_client()
     paginator = client.get_paginator("list_objects_v2")
     keys = []
@@ -109,16 +104,15 @@ def list_s3_keys(prefix: str) -> list[str]:
 
 
 def delete_s3_keys(keys: list[str]):
-    """Batch-delete S3 keys using boto3 (up to 1000 per request)."""
+    """Batch-delete S3 keys (up to 1000 per request)."""
     client = get_s3_client()
-    # S3 delete_objects accepts max 1000 keys per call
     for i in range(0, len(keys), 1000):
         batch = [{"Key": k} for k in keys[i:i + 1000]]
         client.delete_objects(Bucket=S3_BUCKET, Delete={"Objects": batch})
 
 
 def list_s3_versions(prefix: str) -> list[str]:
-    """List versioned directories under a prefix using boto3."""
+    """List versioned directories under a prefix."""
     client = get_s3_client()
     paginator = client.get_paginator("list_objects_v2")
     versions = []
@@ -140,3 +134,15 @@ def list_recent_s3_keys(prefix: str, minutes: int = DRIFT_WINDOW_MINUTES) -> lis
             if obj["LastModified"].replace(tzinfo=timezone.utc) > cutoff:
                 keys.append(obj["Key"])
     return keys
+
+
+def write_json_to_s3(data: dict, s3_key: str):
+    """Write a JSON object to S3."""
+    import json
+    client = get_s3_client()
+    client.put_object(
+        Bucket=S3_BUCKET,
+        Key=s3_key,
+        Body=json.dumps(data),
+        ContentType="application/json",
+    )

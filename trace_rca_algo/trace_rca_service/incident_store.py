@@ -1,4 +1,4 @@
-"""Incident storage using S3 JSON files, queryable via DuckDB."""
+"""Incident storage using ClickHouse (replaces S3 JSON + DuckDB)."""
 
 import json
 import logging
@@ -7,10 +7,8 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-import boto3
+from clickhouse_driver import Client
 
-
-# Validate app_id format: lowercase alphanumeric with hyphens, max 63 chars
 APP_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$|^[a-z0-9]$")
 
 
@@ -20,27 +18,58 @@ def _validate_app_id(app_id: str) -> bool:
         return False
     return bool(APP_ID_PATTERN.match(app_id))
 
+
 log = logging.getLogger("trace-rca-service")
 
-S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
-S3_REGION = os.getenv("S3_REGION", "us-east-1")
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-RCA_RESULTS_PREFIX = "rca-results"
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "clickhouse-cluster-client.clickhouse.svc.cluster.local")
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "9000"))
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
+CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
 
-_s3_client = None
+_client = None
 
 
-def _get_s3():
-    global _s3_client
-    if _s3_client is None:
-        _s3_client = boto3.client(
-            "s3",
-            region_name=S3_REGION,
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+def _get_clickhouse() -> Client:
+    """Get or create ClickHouse client (singleton)."""
+    global _client
+    if _client is None:
+        _client = Client(
+            host=CLICKHOUSE_HOST,
+            port=CLICKHOUSE_PORT,
+            user=CLICKHOUSE_USER,
+            password=CLICKHOUSE_PASSWORD,
+            database=CLICKHOUSE_DATABASE,
         )
-    return _s3_client
+    return _client
+
+
+def init_incidents_table():
+    """Create incidents table if not exists."""
+    client = _get_clickhouse()
+    client.execute("""
+        CREATE TABLE IF NOT EXISTS incidents (
+            incident_id String,
+            app_id String,
+            created_at DateTime,
+            time_window_start DateTime,
+            time_window_end DateTime,
+            stage1_ranking String,
+            root_cause String,
+            confidence_level String,
+            analysis_summary String,
+            total_traces UInt32,
+            anomalous_traces UInt32,
+            services Array(String),
+            log_evidence String,
+            status String
+        )
+        ENGINE = MergeTree()
+        ORDER BY (created_at, app_id)
+        TTL created_at + INTERVAL 90 DAY DELETE
+        SETTINGS storage_policy = 'hot_cold'
+    """)
+    log.info("Incidents table initialized")
 
 
 def build_incident(ranking, llm_result, logs, traces, start_dt, end_dt, app_id: str = None):
@@ -74,39 +103,82 @@ def build_incident(ranking, llm_result, logs, traces, start_dt, end_dt, app_id: 
 
 
 def save_incident(incident: dict) -> str:
-    """Upload incident JSON to S3. Returns incident_id.
-
-    Storage path: rca-results/app_id={id}/{incident_id}.json
-    For incidents without app_id, stores at rca-results/{incident_id}.json (legacy)
-    """
+    """Save incident to ClickHouse. Returns incident_id."""
     incident_id = incident["incident_id"]
-    app_id = incident.get("app_id")
+    app_id = incident.get("app_id") or ""
+    time_window = incident.get("time_window", {})
+    stage2 = incident.get("stage2_result") or {}
+    trace_summary = incident.get("trace_summary", {})
 
-    if app_id:
-        key = f"{RCA_RESULTS_PREFIX}/app_id={app_id}/{incident_id}.json"
-    else:
-        key = f"{RCA_RESULTS_PREFIX}/{incident_id}.json"
+    created_at = datetime.fromisoformat(incident["created_at"].replace("Z", "+00:00"))
+    time_start = datetime.fromisoformat(time_window.get("start", created_at.isoformat()).replace("Z", "+00:00"))
+    time_end = datetime.fromisoformat(time_window.get("end", created_at.isoformat()).replace("Z", "+00:00"))
 
-    _get_s3().put_object(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Body=json.dumps(incident, default=str).encode("utf-8"),
-        ContentType="application/json",
-    )
-    log.info("Saved incident %s to s3://%s/%s", incident_id, S3_BUCKET, key)
+    data = [(
+        incident_id,
+        app_id,
+        created_at,
+        time_start,
+        time_end,
+        json.dumps(incident.get("stage1_ranking", [])),
+        stage2.get("root_cause", ""),
+        stage2.get("confidence_level", ""),
+        stage2.get("analysis_summary", ""),
+        trace_summary.get("total_traces", 0),
+        trace_summary.get("anomalous_traces", 0),
+        trace_summary.get("services", []),
+        json.dumps(incident.get("log_evidence", [])),
+        incident.get("status", "completed"),
+    )]
+
+    client = _get_clickhouse()
+    client.execute("""
+        INSERT INTO incidents (
+            incident_id, app_id, created_at, time_window_start, time_window_end,
+            stage1_ranking, root_cause, confidence_level, analysis_summary,
+            total_traces, anomalous_traces, services, log_evidence, status
+        ) VALUES
+    """, data)
+
+    log.info("Saved incident %s to ClickHouse", incident_id)
     return incident_id
 
 
-def list_incidents(db_con, app_id: str = None, app_ids: list[str] = None, limit: int = 100) -> list[dict]:
-    """List incidents from S3 via DuckDB (summary fields only).
+def _row_to_incident(row: tuple, columns: list[str]) -> dict:
+    """Convert ClickHouse row to incident dict."""
+    data = dict(zip(columns, row))
+    return {
+        "incident_id": data["incident_id"],
+        "app_id": data["app_id"] or None,
+        "created_at": data["created_at"].isoformat() if data["created_at"] else None,
+        "time_window": {
+            "start": data["time_window_start"].isoformat() if data["time_window_start"] else None,
+            "end": data["time_window_end"].isoformat() if data["time_window_end"] else None,
+        },
+        "stage1_ranking": json.loads(data["stage1_ranking"]) if data["stage1_ranking"] else [],
+        "stage2_result": {
+            "root_cause": data["root_cause"],
+            "confidence_level": data["confidence_level"],
+            "analysis_summary": data["analysis_summary"],
+        },
+        "trace_summary": {
+            "total_traces": data["total_traces"],
+            "anomalous_traces": data["anomalous_traces"],
+            "services": list(data["services"]) if data["services"] else [],
+        },
+        "log_evidence": json.loads(data["log_evidence"]) if data["log_evidence"] else [],
+        "status": data["status"],
+    }
+
+
+def list_incidents(app_id: str = None, app_ids: list[str] = None, limit: int = 100) -> list[dict]:
+    """List incidents from ClickHouse (summary fields only).
 
     Args:
-        db_con: DuckDB connection
         app_id: Filter by single app_id (optional)
         app_ids: Filter by multiple app_ids (optional)
         limit: Max number of incidents to return (default 100)
     """
-    # Build WHERE clause for app_id filtering (with validation to prevent SQL injection)
     where_clause = ""
     if app_id:
         if not _validate_app_id(app_id):
@@ -121,121 +193,82 @@ def list_incidents(db_con, app_id: str = None, app_ids: list[str] = None, limit:
         app_ids_str = ", ".join(f"'{a}'" for a in valid_ids)
         where_clause = f"WHERE app_id IN ({app_ids_str})"
 
-    # Clamp limit to prevent abuse
     limit = min(max(1, limit), 1000)
 
-    # Query legacy path (root-level JSON files without app_id)
-    legacy_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/*.json"
-    results = []
-
-    try:
-        legacy_query = f"""
-            SELECT
-                incident_id::VARCHAR AS incident_id,
-                NULL::VARCHAR AS app_id,
-                created_at,
-                time_window,
-                stage2_result.root_cause AS root_cause,
-                stage2_result.confidence_level AS confidence_level,
-                stage1_ranking[1].service AS top_service,
-                stage1_ranking[1].score AS top_score,
-                trace_summary,
-                status
-            FROM read_json_auto('{legacy_glob}')
-        """
-        df = db_con.cursor().execute(legacy_query).fetchdf()
-        results.extend(json.loads(df.to_json(orient="records")))
-    except Exception as e:
-        log.debug("No legacy incidents found: %s", e)
-
-    # Query app-partitioned path
-    partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
-    try:
-        partitioned_query = f"""
-            SELECT
-                incident_id::VARCHAR AS incident_id,
-                app_id,
-                created_at,
-                time_window,
-                stage2_result.root_cause AS root_cause,
-                stage2_result.confidence_level AS confidence_level,
-                stage1_ranking[1].service AS top_service,
-                stage1_ranking[1].score AS top_score,
-                trace_summary,
-                status
-            FROM read_json_auto('{partitioned_glob}')
-        """
-        df = db_con.cursor().execute(partitioned_query).fetchdf()
-        results.extend(json.loads(df.to_json(orient="records")))
-    except Exception as e:
-        log.debug("No app-partitioned incidents found: %s", e)
-
-    # Apply filtering and sorting in Python
-    if app_id:
-        results = [r for r in results if r.get("app_id") == app_id]
-    elif app_ids:
-        valid_ids = set(app_ids)
-        results = [r for r in results if r.get("app_id") in valid_ids]
-
-    # Sort by created_at descending and limit
-    results.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-    return results[:limit]
-
-
-def list_applications(db_con) -> list[str]:
-    """List all unique app_ids from incidents (only from app-partitioned paths)."""
-    partitioned_glob = f"s3://{S3_BUCKET}/{RCA_RESULTS_PREFIX}/app_id=*/*.json"
-    try:
-        query = f"""
-            SELECT DISTINCT app_id
-            FROM read_json_auto('{partitioned_glob}')
-            WHERE app_id IS NOT NULL
-            ORDER BY app_id
-        """
-        df = db_con.cursor().execute(query).fetchdf()
-        return df["app_id"].tolist()
-    except Exception as e:
-        log.debug("No app-partitioned incidents found: %s", e)
-        return []
-
-
-def get_incident(db_con, incident_id: str, app_id: str = None) -> dict | None:
-    """Read a single incident from S3.
-
-    Searches:
-    1. If app_id provided: rca-results/app_id={app_id}/{incident_id}.json
-    2. New path pattern: rca-results/app_id=*/{incident_id}.json (via S3 list)
-    3. Legacy path: rca-results/{incident_id}.json
+    query = f"""
+        SELECT
+            incident_id,
+            app_id,
+            created_at,
+            time_window_start,
+            time_window_end,
+            stage1_ranking,
+            root_cause,
+            confidence_level,
+            analysis_summary,
+            total_traces,
+            anomalous_traces,
+            services,
+            log_evidence,
+            status
+        FROM incidents
+        {where_clause}
+        ORDER BY created_at DESC
+        LIMIT {limit}
     """
-    s3 = _get_s3()
 
-    # Try app_id-specific path first if provided
+    client = _get_clickhouse()
+    result, columns = client.execute(query, with_column_types=True)
+    col_names = [c[0] for c in columns]
+
+    return [_row_to_incident(row, col_names) for row in result]
+
+
+def list_applications() -> list[str]:
+    """List all unique app_ids from incidents."""
+    query = """
+        SELECT DISTINCT app_id
+        FROM incidents
+        WHERE app_id != ''
+        ORDER BY app_id
+    """
+    client = _get_clickhouse()
+    result = client.execute(query)
+    return [row[0] for row in result]
+
+
+def get_incident(incident_id: str, app_id: str = None) -> dict | None:
+    """Get a single incident from ClickHouse."""
+    where_parts = [f"incident_id = '{incident_id}'"]
     if app_id and _validate_app_id(app_id):
-        try:
-            key = f"{RCA_RESULTS_PREFIX}/app_id={app_id}/{incident_id}.json"
-            obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
-            return json.loads(obj["Body"].read())
-        except s3.exceptions.NoSuchKey:
-            pass
+        where_parts.append(f"app_id = '{app_id}'")
 
-    # Search for incident in app-partitioned paths
-    try:
-        prefix = f"{RCA_RESULTS_PREFIX}/app_id="
-        response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
-        for obj_meta in response.get("Contents", []):
-            if obj_meta["Key"].endswith(f"/{incident_id}.json"):
-                obj = s3.get_object(Bucket=S3_BUCKET, Key=obj_meta["Key"])
-                return json.loads(obj["Body"].read())
-    except Exception as e:
-        log.warning("Error searching app-partitioned incidents: %s", e)
+    query = f"""
+        SELECT
+            incident_id,
+            app_id,
+            created_at,
+            time_window_start,
+            time_window_end,
+            stage1_ranking,
+            root_cause,
+            confidence_level,
+            analysis_summary,
+            total_traces,
+            anomalous_traces,
+            services,
+            log_evidence,
+            status
+        FROM incidents
+        WHERE {' AND '.join(where_parts)}
+        LIMIT 1
+    """
 
-    # Try legacy path
-    try:
-        key = f"{RCA_RESULTS_PREFIX}/{incident_id}.json"
-        obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
-        return json.loads(obj["Body"].read())
-    except s3.exceptions.NoSuchKey:
+    client = _get_clickhouse()
+    result, columns = client.execute(query, with_column_types=True)
+
+    if not result:
         return None
-    except Exception as e:
-        log.warning("Failed to get incident %s: %s", incident_id, e)
-        return None
+
+    col_names = [c[0] for c in columns]
+    return _row_to_incident(result[0], col_names)

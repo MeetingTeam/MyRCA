@@ -1,10 +1,12 @@
 """
 DAG 1: Training Pipeline (Hybrid K8s + AWS Batch)
 ─────────────────────────────────────────────────
-compact >> drift_detection >> preprocess >> train (Batch) >> evaluate (Batch)
+drift_detection >> preprocess >> train (Batch) >> evaluate (Batch)
 
 Uses KubernetesPodOperator for lightweight tasks and BatchOperator
 for GPU-intensive training/evaluation on AWS Batch Spot instances.
+
+Note: compact task removed - ClickHouse tiered storage handles data lifecycle.
 """
 
 from datetime import datetime, timedelta
@@ -37,10 +39,12 @@ ENV_VARS = [
     k8s.V1EnvVar(name="S3_REGION", value=S3_REGION),
     k8s.V1EnvVar(name="S3_ENDPOINT", value="s3.amazonaws.com"),
     k8s.V1EnvVar(name="S3_USE_SSL", value="true"),
-    k8s.V1EnvVar(name="FORCE_DRIFT", value="false"),  # Production: detect real drift
-    k8s.V1EnvVar(name="USE_EVIDENTLY", value="true"),  # Enable Evidently drift detection
+    k8s.V1EnvVar(name="FORCE_DRIFT", value="false"),
+    k8s.V1EnvVar(name="USE_EVIDENTLY", value="true"),
     k8s.V1EnvVar(name="EVIDENTLY_WORKSPACE", value="http://evidently-ui.mlops.svc.cluster.local:8000"),
-    k8s.V1EnvVar(name="MIN_DRIFT_SAMPLES", value="10"),  # Lower threshold for testing
+    k8s.V1EnvVar(name="MIN_DRIFT_SAMPLES", value="10"),
+    k8s.V1EnvVar(name="CLICKHOUSE_HOST", value="clickhouse-cluster-client.clickhouse.svc.cluster.local"),
+    k8s.V1EnvVar(name="CLICKHOUSE_PORT", value="9000"),
 ]
 
 ENV_FROM = [
@@ -121,26 +125,8 @@ with DAG(
 ) as dag:
 
     # ─────────────────────────────────────────────────────────────
-    # Lightweight tasks on K8s (unchanged)
+    # Lightweight tasks on K8s
     # ─────────────────────────────────────────────────────────────
-
-    compact = KubernetesPodOperator(
-        task_id="compact",
-        name="compact",
-        namespace=NAMESPACE,
-        image=PIPELINE_IMAGE,
-        image_pull_policy="Always",
-        cmds=["python", "-m", "tasks.compaction"],
-        env_vars=ENV_VARS,
-        env_from=ENV_FROM,
-        is_delete_operator_pod=True,
-        get_logs=True,
-        startup_timeout_seconds=1800,
-        container_resources=k8s.V1ResourceRequirements(
-            requests={"cpu": "250m", "memory": "512Mi"},
-            limits={"cpu": "1", "memory": "2Gi"},
-        ),
-    )
 
     drift_detection = KubernetesPodOperator(
         task_id="drift_detection",
@@ -263,5 +249,5 @@ with DAG(
     # Task dependencies
     # ─────────────────────────────────────────────────────────────
 
-    compact >> drift_detection >> check_drift_result >> [trigger_retrain, no_retrain]
+    drift_detection >> check_drift_result >> [trigger_retrain, no_retrain]
     trigger_retrain >> preprocess >> train >> fetch_train_result >> evaluate >> fetch_evaluate_result >> model_comparison

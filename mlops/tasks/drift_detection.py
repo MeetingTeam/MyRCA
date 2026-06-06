@@ -13,23 +13,20 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
 
-from datetime import timedelta
-
 from tasks.s3_utils import (
     S3_BUCKET,
     DRIFT_WINDOW_MINUTES,
-    get_duckdb_connection,
     read_parquet_from_s3,
     s3_path,
-    list_s3_keys,
     list_s3_versions,
-    list_recent_s3_keys,
+    write_json_to_s3,
 )
+from tasks.clickhouse_utils import load_recent_anomaly_data
 from tasks.mlflow_utils import start_pipeline_run
 from tasks.evidently_monitoring import SpanMonitoring, WorkspaceManager
 from tasks.evidently_strategies import DriftTestSuiteStrategy, DataDriftStrategy
@@ -276,37 +273,22 @@ def run():
         return write_xcom_and_return(version_id, True, mlflow_run_id, "trigger_retrain")
 
     window_minutes = DRIFT_WINDOW_MINUTES
-    keys = list_recent_s3_keys("anomalies/data.parquet/", minutes=window_minutes)
 
-    if not keys:
-        log.warning("No S3 files in last %d mins, falling back to 60-min", window_minutes)
-        window_minutes = 60
-        keys = list_recent_s3_keys("anomalies/data.parquet/", minutes=window_minutes)
-
-    if not keys:
-        log.info("No recent data found — skipping drift detection")
-        return write_xcom_and_return(version_id, False, None, "no_retrain")
-
-    parquet_files = [f"s3://{S3_BUCKET}/{k}" for k in keys if k.endswith(".parquet")]
-    if not parquet_files:
-        log.info("No parquet files in recent keys — skipping")
-        return write_xcom_and_return(version_id, False, None, "no_retrain")
-
-    log.info("Found %d parquet files in last %d mins", len(parquet_files), window_minutes)
-    file_list_sql = ", ".join(f"'{f}'" for f in parquet_files)
-
-    cutoff_epoch = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp()
-    con = get_duckdb_connection()
+    # Load current anomaly data from ClickHouse (replaces S3/DuckDB)
     try:
-        current_df = con.execute(f"""
-            SELECT * FROM read_parquet([{file_list_sql}], hive_partitioning=1, union_by_name=1)
-            WHERE epoch(timestamp) >= {cutoff_epoch}
-        """).fetchdf()
+        current_df = load_recent_anomaly_data(window_minutes)
     except Exception as e:
-        log.error("Failed to read current data from S3: %s", e)
-        con.close()
+        log.error("Failed to load data from ClickHouse: %s", e)
         return write_xcom_and_return(version_id, False, None, "no_retrain")
-    con.close()
+
+    if current_df.empty:
+        log.warning("No data in last %d mins, falling back to 60-min window", window_minutes)
+        window_minutes = 60
+        try:
+            current_df = load_recent_anomaly_data(window_minutes)
+        except Exception as e:
+            log.error("Failed to load fallback data from ClickHouse: %s", e)
+            return write_xcom_and_return(version_id, False, None, "no_retrain")
 
     if current_df.empty:
         log.info("No data after startTime filter — skipping")
@@ -445,14 +427,9 @@ def run():
         "window_minutes": window_minutes,
     }
 
-    report_path = s3_path(f"mlops/drift-reports/{version_id}/drift_report.json")
-    con = get_duckdb_connection()
-    con.execute(f"""
-        COPY (SELECT '{json.dumps(report)}' AS report)
-        TO '{report_path}' (FORMAT CSV, HEADER false);
-    """)
-    con.close()
-    log.info("Drift report saved to %s", report_path)
+    report_key = f"mlops/drift-reports/{version_id}/drift_report.json"
+    write_json_to_s3(report, report_key)
+    log.info("Drift report saved to s3://%s/%s", S3_BUCKET, report_key)
 
     if drift_detected:
         log.info("Drift detected — proceeding with retraining")
