@@ -4,6 +4,7 @@ import {
   Users,
   BarChart3,
   Key,
+  Cpu,
   ChevronLeft,
   ChevronRight
 } from 'lucide-react'
@@ -12,6 +13,7 @@ const menuItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/users', icon: Users, label: 'Roles & Users' },
   { path: '/grafana', icon: BarChart3, label: 'Grafana' },
+  { path: '/mlops', icon: Cpu, label: 'MLOps' },
   { path: '/api-keys', icon: Key, label: 'API Keys' },
 ]
 

@@ -7,6 +7,7 @@ import IncidentDetail from './components/incident-detail'
 import LoginPage from './components/login-page'
 import Sidebar from './components/sidebar'
 import GrafanaLinks from './components/grafana-links'
+import MlopsLinks from './components/mlops-links'
 import ApiKeysPage from './components/api-keys-page'
 import RolesUsersPage from './components/roles-users-page'
 import { fetchApplications } from './api'
@@ -139,6 +140,7 @@ function Dashboard() {
               <Route path="/incidents/:id" element={<IncidentDetail />} />
               <Route path="/users" element={<RolesUsersPage />} />
               <Route path="/grafana" element={<GrafanaLinks />} />
+              <Route path="/mlops" element={<MlopsLinks />} />
               <Route path="/api-keys" element={<ApiKeysPage />} />
             </Routes>
           </main>
