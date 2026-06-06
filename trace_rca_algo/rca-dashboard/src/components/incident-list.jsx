@@ -50,7 +50,8 @@ export default function IncidentList() {
   const services = useMemo(() => {
     const set = new Set()
     incidents.forEach(inc => {
-      const svc = inc.root_cause?.service || inc.top_service
+      const s2 = inc.stage2_result || {}
+      const svc = s2.root_cause?.service || inc.top_service
       if (svc) set.add(svc)
     })
     return [...set].sort()
@@ -59,8 +60,9 @@ export default function IncidentList() {
   // Apply filters
   const filteredIncidents = useMemo(() => {
     return incidents.filter(inc => {
-      const rootSvc = inc.root_cause?.service || inc.top_service || ''
-      const level = inc.confidence_level || ''
+      const s2 = inc.stage2_result || {}
+      const rootSvc = s2.root_cause?.service || inc.top_service || ''
+      const level = s2.confidence_level || ''
       const start = inc.time_window?.start || ''
 
       if (serviceFilter && rootSvc !== serviceFilter) return false
@@ -190,9 +192,10 @@ export default function IncidentList() {
           </thead>
           <tbody>
             {filteredIncidents.map((inc) => {
-              const rootSvc = inc.root_cause?.service || inc.top_service || '—'
-              const confidence = inc.root_cause?.confidence ?? inc.top_score
-              const level = inc.confidence_level
+              const s2 = inc.stage2_result || {}
+              const rootSvc = s2.root_cause?.service || inc.top_service || '—'
+              const confidence = s2.root_cause?.confidence ?? inc.top_score
+              const level = s2.confidence_level
               const tw = inc.time_window || {}
               const start = tw.start ? new Date(tw.start + 'Z').toLocaleString() : '—'
 
