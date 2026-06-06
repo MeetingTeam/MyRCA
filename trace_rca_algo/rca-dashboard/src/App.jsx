@@ -1,10 +1,14 @@
 import { useState, useEffect, createContext, useContext } from 'react'
-import { Routes, Route, Link, useSearchParams } from 'react-router-dom'
+import { Routes, Route, Link, Navigate, useSearchParams } from 'react-router-dom'
+import { GoogleOAuthProvider } from '@react-oauth/google'
+import { AuthProvider, useAuth } from './auth-context'
 import IncidentList from './components/incident-list'
 import IncidentDetail from './components/incident-detail'
+import LoginPage from './components/login-page'
 import { fetchApplications } from './api'
 
-// App filter context for sharing selected apps across components
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
+
 const AppFilterContext = createContext({
   applications: [],
   selectedApps: [],
@@ -15,7 +19,43 @@ const AppFilterContext = createContext({
 
 export const useAppFilter = () => useContext(AppFilterContext)
 
-export default function App() {
+function ProtectedRoute({ children }) {
+  const { isAuthenticated, loading } = useAuth()
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+        <div className="text-gray-400">Loading...</div>
+      </div>
+    )
+  }
+  if (!isAuthenticated) return <Navigate to="/login" replace />
+  return children
+}
+
+function UserMenu() {
+  const { user, logout } = useAuth()
+  if (!user) return null
+  return (
+    <div className="flex items-center gap-3">
+      {user.picture && (
+        <img
+          src={user.picture}
+          alt={user.name}
+          className="w-8 h-8 rounded-full border-2 border-gray-600"
+        />
+      )}
+      <span className="text-sm text-gray-300">{user.name || user.email}</span>
+      <button
+        onClick={logout}
+        className="px-3 py-1 text-xs text-gray-400 hover:text-white hover:bg-gray-700 rounded transition"
+      >
+        Logout
+      </button>
+    </div>
+  )
+}
+
+function Dashboard() {
   const [applications, setApplications] = useState([])
   const [selectedApps, setSelectedApps] = useState([])
   const [loading, setLoading] = useState(true)
@@ -64,11 +104,14 @@ export default function App() {
     <AppFilterContext.Provider value={{ applications, selectedApps, setSelectedApps, loading, error }}>
       <div className="min-h-screen">
         <nav className="bg-dark-800 border-b border-gray-700 px-6 py-3">
-          <div className="flex items-center gap-4 mb-2">
-            <Link to="/" className="text-lg font-bold text-white hover:text-blue-400">
-              MyRCA Dashboard
-            </Link>
-            <span className="text-gray-500 text-sm">Root Cause Analysis</span>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-4">
+              <Link to="/" className="text-lg font-bold text-white hover:text-blue-400">
+                MyRCA Dashboard
+              </Link>
+              <span className="text-gray-500 text-sm">Root Cause Analysis</span>
+            </div>
+            <UserMenu />
           </div>
 
           {/* App filter chips */}
@@ -111,5 +154,22 @@ export default function App() {
         </main>
       </div>
     </AppFilterContext.Provider>
+  )
+}
+
+export default function App() {
+  return (
+    <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/*" element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          } />
+        </Routes>
+      </AuthProvider>
+    </GoogleOAuthProvider>
   )
 }

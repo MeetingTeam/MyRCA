@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -27,21 +28,20 @@ CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
 CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
 
-_client = None
+_thread_local = threading.local()
 
 
 def _get_clickhouse() -> Client:
-    """Get or create ClickHouse client (singleton)."""
-    global _client
-    if _client is None:
-        _client = Client(
+    """Get or create ClickHouse client (thread-local, safe for concurrent requests)."""
+    if not hasattr(_thread_local, 'client'):
+        _thread_local.client = Client(
             host=CLICKHOUSE_HOST,
             port=CLICKHOUSE_PORT,
             user=CLICKHOUSE_USER,
             password=CLICKHOUSE_PASSWORD,
             database=CLICKHOUSE_DATABASE,
         )
-    return _client
+    return _thread_local.client
 
 
 def init_incidents_table():
@@ -121,7 +121,7 @@ def save_incident(incident: dict) -> str:
         time_start,
         time_end,
         json.dumps(incident.get("stage1_ranking", [])),
-        stage2.get("root_cause", ""),
+        json.dumps(stage2.get("root_cause", {})) if isinstance(stage2.get("root_cause"), dict) else str(stage2.get("root_cause", "")),
         stage2.get("confidence_level", ""),
         stage2.get("analysis_summary", ""),
         trace_summary.get("total_traces", 0),
@@ -157,7 +157,7 @@ def _row_to_incident(row: tuple, columns: list[str]) -> dict:
         },
         "stage1_ranking": json.loads(data["stage1_ranking"]) if data["stage1_ranking"] else [],
         "stage2_result": {
-            "root_cause": data["root_cause"],
+            "root_cause": json.loads(data["root_cause"]) if data["root_cause"] else {},
             "confidence_level": data["confidence_level"],
             "analysis_summary": data["analysis_summary"],
         },

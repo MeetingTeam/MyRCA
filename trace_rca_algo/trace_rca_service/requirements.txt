@@ -6,3 +6,5 @@ anthropic
 fastapi
 uvicorn
 clickhouse-driver
+google-auth
+PyJWT

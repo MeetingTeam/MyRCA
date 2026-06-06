@@ -17,13 +17,15 @@ spec:
     spec:
       containers:
         - name: trace-rca-service
-          image: hungtran679/trace_rca_service:latest
+          image: asdads6495/myrca-trace-rca-service:auth
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: trace-rca-service-configmap
             - secretRef:
                 name: trace-rca-service-secret
+            - secretRef:
+                name: rca-auth-secrets
           resources:
             requests:
               cpu: 500m

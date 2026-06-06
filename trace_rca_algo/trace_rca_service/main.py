@@ -202,7 +202,10 @@ def send_rca_notification(
 
 def main():
     log.info("Starting RCA Service...")
-    
+
+    # Initialize incidents table in ClickHouse
+    incident_store.init_incidents_table()
+
     # Setup Kafka consumer
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
@@ -224,7 +227,7 @@ def main():
 
     # ── Start REST API server in background thread ────────────────
     threading.Thread(
-        target=lambda: uvicorn.run(api_module.app, host="0.0.0.0", port=8082, log_level="warning"),
+        target=lambda: uvicorn.run(api_module.app, host="0.0.0.0", port=8080, log_level="warning"),
         daemon=True,
     ).start()
     log.info("API server started on port 8080")
