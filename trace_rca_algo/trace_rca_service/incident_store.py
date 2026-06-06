@@ -13,6 +13,16 @@ from clickhouse_driver import Client
 APP_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$|^[a-z0-9]$")
 
 
+def _safe_json_loads(value: str, default):
+    """Parse JSON with fallback to default on error."""
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
 def _validate_app_id(app_id: str) -> bool:
     """Validate app_id format to prevent SQL injection."""
     if not app_id:
@@ -123,7 +133,7 @@ def save_incident(incident: dict) -> str:
         json.dumps(incident.get("stage1_ranking", [])),
         json.dumps(stage2.get("root_cause", {})) if isinstance(stage2.get("root_cause"), dict) else str(stage2.get("root_cause", "")),
         stage2.get("confidence_level", ""),
-        stage2.get("analysis_summary", ""),
+        json.dumps(stage2.get("analysis", [])),
         trace_summary.get("total_traces", 0),
         trace_summary.get("anomalous_traces", 0),
         trace_summary.get("services", []),
@@ -155,18 +165,18 @@ def _row_to_incident(row: tuple, columns: list[str]) -> dict:
             "start": data["time_window_start"].isoformat() if data["time_window_start"] else None,
             "end": data["time_window_end"].isoformat() if data["time_window_end"] else None,
         },
-        "stage1_ranking": json.loads(data["stage1_ranking"]) if data["stage1_ranking"] else [],
+        "stage1_ranking": _safe_json_loads(data["stage1_ranking"], []),
         "stage2_result": {
-            "root_cause": json.loads(data["root_cause"]) if data["root_cause"] else {},
+            "root_cause": _safe_json_loads(data["root_cause"], {}),
             "confidence_level": data["confidence_level"],
-            "analysis_summary": data["analysis_summary"],
+            "analysis": _safe_json_loads(data["analysis_summary"], []),
         },
         "trace_summary": {
             "total_traces": data["total_traces"],
             "anomalous_traces": data["anomalous_traces"],
             "services": list(data["services"]) if data["services"] else [],
         },
-        "log_evidence": json.loads(data["log_evidence"]) if data["log_evidence"] else [],
+        "log_evidence": _safe_json_loads(data["log_evidence"], []),
         "status": data["status"],
     }
 
