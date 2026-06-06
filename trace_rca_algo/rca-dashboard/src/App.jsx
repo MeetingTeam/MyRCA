@@ -8,6 +8,7 @@ import LoginPage from './components/login-page'
 import Sidebar from './components/sidebar'
 import PlaceholderPage from './components/placeholder-page'
 import GrafanaLinks from './components/grafana-links'
+import ApiKeysPage from './components/api-keys-page'
 import { fetchApplications } from './api'
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
@@ -149,12 +150,7 @@ function Dashboard() {
                 />
               } />
               <Route path="/grafana" element={<GrafanaLinks />} />
-              <Route path="/api-keys" element={
-                <PlaceholderPage
-                  title="API Keys"
-                  description="Configure API keys for LLM reasoning models (Claude, GPT, etc.)."
-                />
-              } />
+              <Route path="/api-keys" element={<ApiKeysPage />} />
             </Routes>
           </main>
         </div>
