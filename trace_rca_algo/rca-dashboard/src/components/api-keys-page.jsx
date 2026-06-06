@@ -156,14 +156,7 @@ export default function ApiKeysPage() {
         </div>
       </div>
 
-      {Object.keys(keys).length === 0 ? (
-        <div className="text-center py-12 text-gray-400">
-          <Key size={48} className="mx-auto mb-4 opacity-50" />
-          <p>No API keys configured</p>
-          <p className="text-sm mt-1">Add your first API key to enable LLM reasoning</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
+      <div className="space-y-3">
           {Object.entries(keys).map(([provider, config]) => {
             const isActive = activeModel === `${provider}:${config.model}`
             return (
@@ -221,8 +214,7 @@ export default function ApiKeysPage() {
               </div>
             )
           })}
-        </div>
-      )}
+      </div>
     </div>
   )
 }
