@@ -87,7 +87,7 @@ class ModelRegistry:
     def _load_model(self, app_id: str) -> Optional[AppModel]:
         """Load model artifacts from S3 (global model, app_id ignored)."""
         try:
-            version = self._find_latest_version(app_id)
+            version = os.getenv("MODEL_VERSION", "latest")
             if not version:
                 log.warning("No model version found")
                 return None
@@ -149,32 +149,6 @@ class ModelRegistry:
         except Exception as e:
             log.error("Failed to load model for app_id=%s: %s", app_id, e)
             self._stats["failures"] += 1
-            return None
-
-    def _find_latest_version(self, app_id: str) -> Optional[str]:
-        """Find latest model version in S3 (global, ignores app_id)."""
-        try:
-            prefix = "mlops/models/"
-            response = self._s3_client.list_objects_v2(
-                Bucket=self.s3_bucket,
-                Prefix=prefix,
-                Delimiter="/",
-            )
-
-            versions = []
-            for cp in response.get("CommonPrefixes", []):
-                version = cp["Prefix"].rstrip("/").split("/")[-1]
-                if version.startswith("v"):
-                    versions.append(version)
-
-            if not versions:
-                return None
-
-            versions.sort(reverse=True)
-            return versions[0]
-
-        except Exception as e:
-            log.error("Failed to list versions: %s", e)
             return None
 
     def _load_local_model(self) -> Optional[AppModel]:

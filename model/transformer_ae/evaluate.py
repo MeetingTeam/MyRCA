@@ -1,28 +1,19 @@
-import os
-import joblib
-import torch
 import numpy as np
-import pandas as pd
-import torch.nn as nn
 
-from torch.utils.data import DataLoader, TensorDataset
-from transformer_ae.model import TransformerAutoencoder
-from configs.constants import UNKNOWN
+from configs.constants import UNKNOWN, DELIMITER
 from common.util import map_status_group
 
 def preprocess_test_df(test_df, encoders, scalers):
-    test_df = test_df.sort_values(by="startTime")
+    # test_df = test_df.sort_values(by="startTime")
+    test_df["app_id"] = "k8s-repo-application"
     test_df["raw_service"] = test_df["service"]
     test_df["raw_operation"] = test_df["operation"]
-    test_df["raw_app_id"] = test_df["app_id"]
     test_df["http_status"] = test_df["http_status"].astype(int).apply(map_status_group)
-
-    # Default app_id when missing (older datasets without the column)
-    if "app_id" not in test_df.columns:
-        test_df["app_id"] = UNKNOWN
-
+    test_df['service'] = test_df['app_id'] + DELIMITER + test_df['service']
+    test_df['operation'] = test_df['app_id'] + DELIMITER + test_df['operation']
+    
     # Encode categorical data (LabelEncoder)
-    for col in ["service", "operation", "app_id"]:
+    for col in ["service", "operation"]:
         encoder = encoders[col]
         test_df[col] = encoder.transform(test_df[col].astype(str))
     
@@ -43,24 +34,22 @@ def preprocess_test_df(test_df, encoders, scalers):
     return test_df
 
 def build_sequences(df, seq_len, metric_cols, stride=1):
-    # app_id added to groupby so sequences never mix spans across apps
-    grouped = df.groupby(["app_id", "service", "parent_service", "operation", "parent_op", "http_status"], sort=False)
+    grouped = df.groupby(["service", "parent_service", "operation", "parent_op", "http_status"], sort=False)
 
-    apps, services, parent_services, operations, parent_ops, statuses = [], [], [], [], [], []
+    services, parent_services, operations, parent_ops, statuses = [], [], [], [], []
     metrics_seq = []
     row_indices = []
 
     metric_cols = list(metric_cols)
 
-    def append_context_features(a, s, ps, op, pop, h):
-        apps.append(a)
+    def append_context_features(s, ps, op, pop, h):
         services.append(s)
         parent_services.append(ps)
         operations.append(op)
         parent_ops.append(pop)
-        statuses.append(h)
+        statuses.append(h)    
 
-    for (a, s, ps, op, pop, h), g in grouped:
+    for (s, ps, op, pop, h), g in grouped:
         metrics = g[metric_cols].to_numpy(dtype=np.float32)
         indices = g.index.to_numpy()
         n = len(g)
@@ -72,24 +61,23 @@ def build_sequences(df, seq_len, metric_cols, stride=1):
             padded_indices = np.full(seq_len, -1, dtype=indices.dtype)
             padded_indices[:n] = indices
 
-            append_context_features(a, s, ps, op, pop, h)
+            append_context_features(s, ps, op, pop, h)
             metrics_seq.append(padded_metrics)
             row_indices.append(padded_indices)
             continue
 
         last_start = n - seq_len
         for i in range(0, last_start + 1, stride):
-            append_context_features(a, s, ps, op, pop, h)
+            append_context_features(s, ps, op, pop, h)
             metrics_seq.append(metrics[i:i + seq_len])
             row_indices.append(indices[i:i + seq_len])
 
         if (last_start % stride) != 0:
-            append_context_features(a, s, ps, op, pop, h)
+            append_context_features(s, ps, op, pop, h)
             metrics_seq.append(metrics[last_start:last_start + seq_len])
             row_indices.append(indices[last_start:last_start + seq_len])
 
     return (
-        np.asarray(apps),
         np.asarray(services),
         np.asarray(parent_services),
         np.asarray(operations),
@@ -98,87 +86,3 @@ def build_sequences(df, seq_len, metric_cols, stride=1):
         np.stack(metrics_seq),
         np.stack(row_indices),
     )
-
-def evaluate_model(test_data_path, export_result=True):
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-    model_path = os.path.join(BASE_DIR, "transformer_ae_model.pth")
-    encoders = joblib.load(os.path.join(BASE_DIR, "transformer_ae_encoders.pkl"))
-    scalers = joblib.load(os.path.join(BASE_DIR, "transformer_ae_scalers.pkl"))
-
-    df = pd.read_csv(test_data_path)
-    df = preprocess_test_df(df, encoders, scalers)
-
-    seq_len = 20
-    metric_cols = ["duration"]
-
-    apps, services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
-        df, seq_len, metric_cols, stride=4
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    dataset = TensorDataset(
-        torch.LongTensor(apps),
-        torch.LongTensor(services),
-        torch.LongTensor(parent_services),
-        torch.LongTensor(operations),
-        torch.LongTensor(parent_ops),
-        torch.LongTensor(statuses),
-        torch.FloatTensor(metrics_x),
-        torch.LongTensor(row_idx),
-    )
-
-    loader = DataLoader(dataset, batch_size=64, shuffle=False)
-
-    model = TransformerAutoencoder(
-        service_vocab=encoders["service"].get_unknown_index() + 1,
-        op_vocab=encoders["operation"].get_unknown_index() + 1,
-        status_vocab=6,
-        app_vocab=encoders["app_id"].get_unknown_index() + 1,
-        metrics_feature_num=len(metric_cols)
-    ).to(device)
-
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-
-    criterion = nn.MSELoss(reduction="none")
-    df["anomaly_score"] = np.nan
-    span_scores = {}
-
-    with torch.no_grad():
-        for a, s, ps, op, pop, h, x, row_ids in loader:
-            a, s, ps, op, pop, h, x = a.to(device), s.to(device), ps.to(device), op.to(device), pop.to(device), h.to(device), x.to(device)
-
-            recon = model(s, ps, op, pop, h, a, x)
-
-            # (B, T, F) → per-timestep score (B, T)
-            timestep_loss = criterion(recon, x).sum(dim=2).cpu().numpy()
-            row_ids = row_ids.numpy()
-
-            for b in range(len(row_ids)):
-                for t_idx in range(seq_len):
-                    row = row_ids[b, t_idx]
-                    metric = x[b, t_idx]
-                    if row == -1 or metric == 0:
-                        continue
-
-                    score = timestep_loss[b, t_idx]
-
-                    # Add more score for http status = 5
-                    if df.at[row, "span_status"] == 2 or df.at[row, "http_status"] == 5:
-                        score += 1000
-                    
-                    if np.isnan(df.at[row, "anomaly_score"]):
-                        df.at[row, "anomaly_score"] = score
-                    else:
-                        df.at[row, "anomaly_score"] = max(
-                            df.at[row, "anomaly_score"], score
-                        )
-                    
-                    span_scores[df.at[row, "spanId"]] = score
-
-    if export_result:
-        df.to_csv(os.path.join(BASE_DIR, "transformer_ae_pred.csv"), index=False)
-
-    return span_scores
