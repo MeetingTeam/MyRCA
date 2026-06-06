@@ -1,0 +1,106 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Abnormal Spans per Minute",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorType": "sql",
+          "format": 0,
+          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, countIf(is_anomaly = 1) AS abnormal_spans FROM anomalies WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "title": "Recent Anomaly Spans",
+      "type": "table",
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorType": "sql",
+          "format": 1,
+          "rawSql": "SELECT timestamp, app_id, trace_id, span_id, parent_span_id, service, operation, http_status, duration_ns, kind, span_status, anomaly_score FROM anomalies WHERE $__timeFilter(timestamp) AND is_anomaly = 1 ORDER BY timestamp DESC LIMIT 100"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "timestamp"
+          }
+        ]
+      }
+    },
+    {
+      "title": "Anomaly Span Rate per Service (%)",
+      "type": "barchart",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 19 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorType": "sql",
+          "format": 1,
+          "rawSql": "SELECT service, countIf(is_anomaly = 1) AS anomaly_spans, count() AS total_spans, round((countIf(is_anomaly = 1) * 100.0) / nullIf(count(), 0), 2) AS anomaly_rate_pct FROM anomalies WHERE $__timeFilter(timestamp) GROUP BY service ORDER BY anomaly_rate_pct DESC LIMIT 20"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "anomaly_rate_pct" },
+            "properties": [
+              { "id": "displayName", "value": "Anomaly Rate (%)" },
+              { "id": "unit", "value": "percent" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["clickhouse", "anomaly", "myrca"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "ClickHouse - Anomalies Overview",
+  "uid": "myrca-clickhouse-anomalies",
+  "version": 1
+}

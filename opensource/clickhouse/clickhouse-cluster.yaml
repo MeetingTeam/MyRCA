@@ -1,27 +1,61 @@
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: clickhouse-s3-credentials
+#   namespace: clickhouse
+# type: Opaque
+# stringData:
+#   AWS_ACCESS_KEY_ID: <access-key-id>
+#   AWS_SECRET_ACCESS_KEY: <secret-access-key>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-storage-config
+  namespace: clickhouse
+data:
+  storage-config.xml: |
+    <clickhouse>
+      <storage_configuration>
+        <disks>
+          <cold_s3>
+            <type>object_storage</type>
+            <object_storage_type>s3</object_storage_type>
+            <metadata_type>local</metadata_type>
+            <endpoint>https://kltn-anomaly-dateset-1.s3.ap-southeast-1.amazonaws.com/clickhouse/</endpoint>
+            <use_environment_credentials>1</use_environment_credentials>
+          </cold_s3>
+        </disks>
+        <policies>
+          <hot_cold>
+            <volumes>
+              <hot>
+                <disk>default</disk>
+                <max_data_part_size_bytes>1073741824</max_data_part_size_bytes>
+              </hot>
+              <cold>
+                <disk>cold_s3</disk>
+              </cold>
+            </volumes>
+            <move_factor>0.8</move_factor>
+          </hot_cold>
+        </policies>
+      </storage_configuration>
+    </clickhouse>
+---
 apiVersion: clickhouse.com/v1alpha1
 kind: KeeperCluster
 metadata:
   name: keeper-cluster
   namespace: clickhouse
 spec:
-  replicas: 1                    # single keeper, no quorum needed for dev
+  replicas: 1
   dataVolumeClaimSpec:
     storageClassName: ebs-sc
     resources:
       requests:
         storage: 1Gi
-  # settings:
-  #   extraConfig:
-  #     keeper_server:
-  #       digest_enabled: false
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: clickhouse-password
-  namespace: clickhouse
-stringData:
-  password: "admin123"
 ---
 apiVersion: v1
 kind: Service
@@ -38,11 +72,11 @@ spec:
     - name: http
       port: 8123
       targetPort: 8123
-      nodePort: 30123   # HTTP interface
+      nodePort: 30123
     - name: tcp
       port: 9000
       targetPort: 9000
-      nodePort: 30900   # native TCP (clickhouse-client)
+      nodePort: 30900
 ---
 apiVersion: clickhouse.com/v1alpha1
 kind: ClickHouseCluster
@@ -66,9 +100,54 @@ spec:
       limits:
         cpu: "500m"
         memory: "700Mi"
+    env:
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+    volumeMounts:
+      - name: storage-config
+        mountPath: /etc/clickhouse-server/config.d
+        subPath: storage-config.xml
+  podTemplate:
+    volumes:
+      - name: storage-config
+        configMap:
+          name: clickhouse-storage-config
   # settings:
-  #   defaultUserPassword:
-  #     passwordType: plaintext
-  #     secret:
-  #       name: clickhouse-password
-  #       key: password
+  #   extraConfig:
+  #     storage:
+  #       disks:
+  #         # Local EBS disk — this is the default disk ClickHouse already uses,
+  #         hot_disk:
+  #           type: local
+  #           path: /var/lib/clickhouse/
+
+  #         # S3 cold disk. The object_storage_type + metadata_storage_type
+  #         cold_s3:
+  #           object_storage_type: s3
+  #           metadata_storage_type: local   # metadata stays on-node, objects go to S3
+  #           endpoint: https://kltn-anomaly-dateset-1.s3.ap-southeast-1.amazonaws.com/clickhouse/
+  #           access_key_id:
+  #             from_env: AWS_ACCESS_KEY_ID 
+  #           secret_access_key:
+  #             from_env: AWS_SECRET_ACCESS_KEY
+
+  #       policies:
+  #         hot_cold:
+  #           volumes:
+  #             # Volume order matters: ClickHouse fills them top-to-bottom.
+  #             - name: hot
+  #               disk: hot_disk
+  #               # Parts move to cold once hot is this full (fraction 0–1).
+  #               max_data_part_size_bytes: 1073741824   # 1 GiB — largest part kept hot
+  #             - name: cold
+  #               disk: cold_s3
+  #           # Start background moves when hot volume exceeds 80 % of its quota.
+  #           move_factor: 0.8
