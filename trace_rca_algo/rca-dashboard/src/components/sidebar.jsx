@@ -2,7 +2,6 @@ import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard,
   Users,
-  FolderKanban,
   BarChart3,
   Key,
   ChevronLeft,
@@ -12,7 +11,6 @@ import {
 const menuItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/users', icon: Users, label: 'Roles & Users' },
-  { path: '/projects', icon: FolderKanban, label: 'Projects' },
   { path: '/grafana', icon: BarChart3, label: 'Grafana' },
   { path: '/api-keys', icon: Key, label: 'API Keys' },
 ]

@@ -6,7 +6,6 @@ import IncidentList from './components/incident-list'
 import IncidentDetail from './components/incident-detail'
 import LoginPage from './components/login-page'
 import Sidebar from './components/sidebar'
-import PlaceholderPage from './components/placeholder-page'
 import GrafanaLinks from './components/grafana-links'
 import ApiKeysPage from './components/api-keys-page'
 import RolesUsersPage from './components/roles-users-page'
@@ -139,12 +138,6 @@ function Dashboard() {
               <Route path="/" element={<IncidentList />} />
               <Route path="/incidents/:id" element={<IncidentDetail />} />
               <Route path="/users" element={<RolesUsersPage />} />
-              <Route path="/projects" element={
-                <PlaceholderPage
-                  title="Projects"
-                  description="Organize and manage multiple applications and their configurations."
-                />
-              } />
               <Route path="/grafana" element={<GrafanaLinks />} />
               <Route path="/api-keys" element={<ApiKeysPage />} />
             </Routes>
