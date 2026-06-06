@@ -8,13 +8,42 @@ tempo:
   # Without this, Tempo sends literal "${AWS_ACCESS_KEY_ID}" to AWS.
   extraArgs:
     config.expand-env: "true"
+  # Inject AWS credentials from secret
+  extraEnv:
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: tempo-s3-credentials
+          key: access-key
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: tempo-s3-credentials
+          key: secret-key
   resources:
     requests:
-      cpu: 250m
+      cpu: 500m
       memory: 512Mi
     limits:
-      cpu: 250m
-      memory: 512Mi
+      cpu: "1"
+      memory: 1Gi
+  # Increased probe timeouts to prevent crash loop under load
+  livenessProbe:
+    httpGet:
+      path: /ready
+      port: 3200
+    initialDelaySeconds: 60
+    periodSeconds: 15
+    timeoutSeconds: 10
+    failureThreshold: 5
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: 3200
+    initialDelaySeconds: 45
+    periodSeconds: 15
+    timeoutSeconds: 10
+    failureThreshold: 5
   
   # OTLP receivers - receives traces from AI Anomaly Detection Model
   # AI Model forwards ALL traces (normal + anomaly) via OTLP/gRPC
