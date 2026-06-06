@@ -16,7 +16,7 @@ import boto3
 import joblib
 import torch
 
-from archive.transformer_ae.model import TransformerAutoencoder
+from transformer_ae.model import TransformerAutoencoder
 from common.safe_label_encoder import SafeLabelEncoder
 
 # Register SafeLabelEncoder in __main__ for pickle compatibility with training scripts

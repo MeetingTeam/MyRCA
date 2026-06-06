@@ -229,7 +229,7 @@ def init_clickhouse():
         )
         ENGINE = MergeTree()
         ORDER BY (timestamp, app_id)
-        TTL timestamp + INTERVAL 1 DAY
+        SETTINGS storage_policy = 'hot_cold';
     """)
 
 def write_to_clickhouse(result_df: pd.DataFrame):

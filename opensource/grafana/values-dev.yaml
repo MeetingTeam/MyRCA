@@ -49,6 +49,7 @@ adminPassword: admin
 # - Tempo: Distributed tracing (default)
 # - Loki: Log aggregation (trace-log correlation via OTel trace_id)
 # - DuckDB: Query anomaly detection results from S3 Parquet
+# - ClickHouse: Query anomaly spans in anomalies table
 # ══════════════════════════════════════════════════════════════════════════════
 datasources:
   datasources.yaml:
@@ -107,6 +108,20 @@ datasources:
             SET s3_use_ssl=true;
             SET s3_url_style='path';
 
+      # ClickHouse datasource for span anomaly table
+      - name: ClickHouse-Anomaly
+        type: grafana-clickhouse-datasource
+        uid: clickhouse
+        access: proxy
+        isDefault: false
+        editable: true
+        jsonData:
+          host: clickhouse-cluster-client.clickhouse.svc.cluster.local
+          defaultDatabase: default
+          port: 8123
+          protocol: http
+          username: default
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD PROVISIONING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -135,7 +150,9 @@ service:
 # PLUGINS
 # - grafana-clock-panel: Utility
 # - motherduck-duckdb-datasource: DuckDB/S3 data source (unsigned, requires env var)
+# - grafana-clickhouse-datasource: ClickHouse datasource
 # ══════════════════════════════════════════════════════════════════════════════
 plugins:
   - grafana-clock-panel
   - https://github.com/motherduckdb/grafana-duckdb-datasource/releases/download/v0.4.0/motherduck-duckdb-datasource-0.4.0.zip;motherduck-duckdb-datasource
+  - grafana-clickhouse-datasource
