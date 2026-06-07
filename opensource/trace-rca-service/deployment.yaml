@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: trace-rca-service
-          image: asdads6495/myrca-trace-rca-service:auth
+          image: hungtran679/anomaly-detection-service
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

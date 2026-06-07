@@ -68,7 +68,7 @@
           "refId": "A",
           "editorType": "sql",
           "format": 1,
-          "rawSql": "SELECT service, countIf(is_anomaly = 1) AS anomaly_spans, count() AS total_spans, round((countIf(is_anomaly = 1) * 100.0) / nullIf(count(), 0), 2) AS anomaly_rate_pct FROM anomalies WHERE $__timeFilter(timestamp) GROUP BY service ORDER BY anomaly_rate_pct DESC LIMIT 20"
+          "rawSql": "SELECT concat(app_id, '/', service) AS service, countIf(is_anomaly = 1) AS anomaly_spans, count() AS total_spans, round((countIf(is_anomaly = 1) * 100.0) / nullIf(count(), 0), 2) AS anomaly_rate_pct FROM anomalies WHERE $__timeFilter(timestamp) GROUP BY app_id, service ORDER BY anomaly_rate_pct DESC LIMIT 20"
         }
       ],
       "fieldConfig": {

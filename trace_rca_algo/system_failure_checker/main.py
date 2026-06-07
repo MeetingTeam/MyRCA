@@ -21,6 +21,7 @@ FAILURE_THRESHOLD = float(os.getenv("FAILURE_THRESHOLD", "0.5"))
 MINIMUM_ANOMALY_SPANS = int(os.getenv("MINIMUM_ANOMALY_SPANS", "10"))
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "1"))
 TIME_WINDOW_MINUTES = int(os.getenv("TIME_WINDOW_MINUTES", "1"))
+DELAY_MINUTES = int(os.getenv("DELAY_MINUTES", "1"))
 APSCHEDULER_MAX_INSTANCES = int(os.getenv("APSCHEDULER_MAX_INSTANCES", "3"))
 APSCHEDULER_MISFIRE_GRACE_TIME = int(os.getenv("APSCHEDULER_MISFIRE_GRACE_TIME", "30"))
 
@@ -134,7 +135,7 @@ def check_system_failures(start_dt, end_dt, record_timestamp):
 
 def check_current_failure():
     record_timestamp = time.time_ns()
-    end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+    end_dt = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=DELAY_MINUTES)
     start_dt = end_dt - timedelta(minutes=TIME_WINDOW_MINUTES)
     check_system_failures(start_dt, end_dt, record_timestamp)
 
