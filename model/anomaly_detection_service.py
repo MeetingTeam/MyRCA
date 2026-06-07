@@ -24,7 +24,6 @@ from confluent_kafka import Consumer, KafkaError, KafkaException
 
 from model_registry import ModelRegistry
 from transformer_ae.evaluate import preprocess_test_df, build_sequences
-from common.util import map_status_group
 from common.performance_metrics import MetricsTracker
 from clickhouse_driver import Client as ClickHouseClient
 
@@ -47,6 +46,7 @@ FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "5"))
 # S3 config (for model registry)
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "kltn-anomaly-dateset-1")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "latest")
 
 # Toggle detailed performance measurement (timing + metrics calculation)
 PERF_MEASUREMENT_ENABLED = os.getenv("PERF_MEASUREMENT_ENABLED", "false").lower() == "true"
@@ -97,16 +97,12 @@ model_registry: ModelRegistry = None
 def init_model_registry():
     """Initialize the global model registry."""
     global model_registry
-    local_fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transformer_ae")
-
     model_registry = ModelRegistry(
         s3_bucket=S3_BUCKET,
         s3_region=S3_REGION,
-        max_models=MAX_CACHED_MODELS,
-        default_app_id=DEFAULT_APP_ID,
-        local_fallback_dir=local_fallback,
+        model_version=MODEL_VERSION,
     )
-    log.info("Model registry initialized (max_models=%d, default=%s)", MAX_CACHED_MODELS, DEFAULT_APP_ID)
+    log.info("Model registry initialized (version=%s)", MODEL_VERSION)
 
 # ── Health server ─────────────────────────────────────────────────────────────
 
@@ -120,12 +116,6 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_header("Content-type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
-        elif self.path == "/cache-stats":
-            stats = model_registry.get_cache_stats() if model_registry else {}
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(stats).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -169,10 +159,6 @@ def write_to_clickhouse(result_df: pd.DataFrame):
         return
 
     try:
-        if "raw_app_id" not in result_df.columns:
-            log.error("Missing app_id column")
-            return
-
         timestamps = pd.to_datetime(
             result_df["startTime"].astype("int64"),
             unit="ns"
@@ -180,7 +166,7 @@ def write_to_clickhouse(result_df: pd.DataFrame):
 
         data = list(zip(
             timestamps,
-            result_df["raw_app_id"].astype(str),
+            result_df["app_id"].astype(str),
             result_df["traceId"].astype(str),
             result_df["spanId"].astype(str),
             result_df["parentSpanId"].fillna("").astype(str),
@@ -222,9 +208,9 @@ def write_to_clickhouse(result_df: pd.DataFrame):
 
 def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
     """Process batch for a single app_id using its specific model."""
-    app_model = model_registry.get_model(app_id)
+    app_model = model_registry.get_model()
     if app_model is None:
-        log.warning("No model available for app_id=%s, skipping %d records", app_id, len(df))
+        log.warning("No model available, skipping %d records for app_id=%s", len(df), app_id)
         return pd.DataFrame()
 
     log.debug("Processing %d records for app_id=%s with model version=%s",
@@ -234,7 +220,7 @@ def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
 
     seq_len = 20
     metric_cols = ["duration"]
-    apps, services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
+    services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
         df, seq_len, metric_cols, stride=1
     )
 
@@ -243,7 +229,6 @@ def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     dataset = TensorDataset(
-        torch.LongTensor(apps),
         torch.LongTensor(services),
         torch.LongTensor(parent_services),
         torch.LongTensor(operations),
@@ -258,8 +243,7 @@ def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
     df["anomaly_score"] = np.nan
 
     with torch.no_grad():
-        for a, s, ps, op, pop, h, x, row_ids in loader:
-            a = a.to(app_model.device)
+        for s, ps, op, pop, h, x, row_ids in loader:
             s = s.to(app_model.device)
             ps = ps.to(app_model.device)
             op = op.to(app_model.device)
@@ -267,7 +251,7 @@ def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
             h = h.to(app_model.device)
             x = x.to(app_model.device)
 
-            recon = app_model.model(s, ps, op, pop, h, a, x)
+            recon = app_model.model(s, ps, op, pop, h, x)
             timestep_loss = criterion(recon, x).mean(dim=2).cpu().numpy()
             row_ids_np = row_ids.numpy()
 
@@ -288,8 +272,7 @@ def process_app_batch(app_id: str, df: pd.DataFrame) -> pd.DataFrame:
                     else:
                         df.at[row, "anomaly_score"] = max(df.at[row, "anomaly_score"], score)
 
-    # df["is_anomaly"] = df["anomaly_score"] > app_model.threshold # Need to check app_model.threshold as is_anomaly is always false
-    df["is_anomaly"] = df["anomaly_score"] > DEFAULT_THRESHOLD
+    df["is_anomaly"] = df["anomaly_score"] > app_model.threshold
 
     result_df = df.dropna(subset=["anomaly_score"]).copy()
     if result_df.empty:
@@ -460,7 +443,6 @@ def main():
                 log.error("Error in final flush: %s", e, exc_info=True)
         consumer.close()
         clickhouse_client.disconnect()
-        log.info("Cache stats at shutdown: %s", model_registry.get_cache_stats())
         log.info("Shutdown complete. total_processed=%d", total_processed)
 
 

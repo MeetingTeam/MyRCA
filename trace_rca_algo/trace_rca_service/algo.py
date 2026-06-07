@@ -1,4 +1,12 @@
 from collections import defaultdict
+import logging
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("trace-rca-service")
 
 def count_abnormal_downstream_nodes(trace, abnormal_invocations, kb):
     """
@@ -46,16 +54,15 @@ def count_abnormal_downstream_nodes(trace, abnormal_invocations, kb):
 def convert_span_scores_to_services(trace, invocation_scores):
     """
     Aggregates scores from individual API calls (invocations) to the Service level.
+    Returns the maximum score among all abnormal spans belonging to each service.
     """
-    score_sum = defaultdict(float)
-    count = defaultdict(int)
+    score_map = defaultdict(list)
     
     for inv_id, score in invocation_scores.items():
         service = trace["nodes"][inv_id]["service"]
-        score_sum[service] += score
-        count[service] += 1
+        score_map[service].append(score)
     
-    return {s: score_sum[s] / count[s] for s in score_sum}
+    return {s: max(scores) for s, scores in score_map.items()}
 
 def compute_causal_scores(traces, kb):
     """
@@ -71,7 +78,7 @@ def compute_causal_scores(traces, kb):
         if not abnormal_span_ids: continue
 
         downstream_count = count_abnormal_downstream_nodes(trace, abnormal_span_ids, kb)
-        span_scores = {inv_id: 1.0 / (1 + 2*cnt) for inv_id, cnt in downstream_count.items()}
+        span_scores = {inv_id: 1.0 / (1 + 3*cnt) for inv_id, cnt in downstream_count.items()}
         
         # Now returns { "service_name": max_score }
         service_scores = convert_span_scores_to_services(trace, span_scores)
@@ -108,7 +115,7 @@ def rank_root_causes(traces, kb):
     final_results = {}
     for s in causal_scores:
         final_results[s] = causal_scores[s] * jaccard_scores.get(s, 0)
-        print(s, causal_scores[s], jaccard_scores[s])
+        log.info(f"Service: {s}, Causal Score: {causal_scores[s]:.4f}, Jaccard Score: {jaccard_scores.get(s, 0):.4f}, Final Score: {final_results[s]:.4f}")
 
     # Sort services by final score descending
     return sorted(final_results.items(), key=lambda x: x[1], reverse=True)
