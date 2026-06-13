@@ -28,6 +28,12 @@ with DAG(
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="airflow-clickhouse-secret")),
             k8s.V1EnvFromSource(config_map_ref=k8s.V1ConfigMapEnvSource(name="airflow-kb-builder-configmap"))
         ],
+        env_vars=[
+            k8s.V1EnvVar(
+                name="AIRFLOW_RUN_ID",
+                value="{{ run_id }}"
+            )
+        ],
         container_resources=k8s.V1ResourceRequirements(
             requests={"cpu": "200m", "memory": "512Mi"},
             limits={"cpu": "500m", "memory": "1Gi"}

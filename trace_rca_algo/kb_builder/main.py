@@ -85,11 +85,19 @@ def register_to_mlflow(new_kb_dict):
             source=kb_s3_uri,
             run_id=run.info.run_id,
         )
+
+        # Set tags
         client.set_model_version_tag(
             name=MLFLOW_KB_MODEL,
             version=new_version.version,
             key="airflow_run_id",
             value=AIRFLOW_RUN_ID,
+        )
+        client.set_model_version_tag(
+            name=MLFLOW_KB_MODEL,
+            version=new_version.version,
+            key="kb_s3_uri",
+            value=kb_s3_uri
         )
         print(f"✅ Registered new MLflow model version: {new_version.version}")
 
