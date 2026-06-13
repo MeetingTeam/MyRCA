@@ -25,15 +25,14 @@ class PositionalEncoding(nn.Module):
 class TransformerAutoencoder(nn.Module):
     def __init__(
         self, service_vocab, op_vocab, status_vocab=6,
-        app_vocab=2, metrics_feature_num=1
+        metrics_feature_num=1
     ):
         super().__init__()
 
         # --- Embedding dims (giữ nguyên GRU) ---
         self.service_embed_dim = 4
         self.op_embed_dim = 6
-        self.status_embed_dim = 2
-        self.app_embed_dim = 2
+        self.status_embed_dim = 3
         self.latent_dim = 32
         self.d_model = 64
 
@@ -41,14 +40,12 @@ class TransformerAutoencoder(nn.Module):
             2 * self.service_embed_dim
             + 2 * self.op_embed_dim
             + self.status_embed_dim
-            + self.app_embed_dim
         )
 
         # --- Embedding layers (giữ nguyên GRU) ---
         self.service_embedding = nn.Embedding(service_vocab, self.service_embed_dim)
         self.op_embedding = nn.Embedding(op_vocab, self.op_embed_dim)
         self.status_embedding = nn.Embedding(status_vocab, self.status_embed_dim)
-        self.app_embedding = nn.Embedding(app_vocab, self.app_embed_dim)
 
         # --- Positional Encoding ---
         self.pos_encoder = PositionalEncoding(self.d_model)
@@ -92,9 +89,9 @@ class TransformerAutoencoder(nn.Module):
 
         self.fc_out = nn.Linear(self.d_model, metrics_feature_num)  # 64 → 1
 
-    def forward(self, service_id, parent_service_id, op_id, parent_op_id, http_status, app_id, metrics_x):
+    def forward(self, service_id, parent_service_id, op_id, parent_op_id, http_status, metrics_x):
         """
-        service_id, parent_service_id, op_id, parent_op_id, http_status, app_id: [B]
+        service_id, parent_service_id, op_id, parent_op_id, http_status: [B]
         metrics_x: [B, T, F]
         """
         batch_size, seq_length, _ = metrics_x.shape
@@ -105,14 +102,12 @@ class TransformerAutoencoder(nn.Module):
         op_emb = self.op_embedding(op_id).unsqueeze(1).expand(batch_size, seq_length, -1)
         parent_op_emb = self.op_embedding(parent_op_id).unsqueeze(1).expand(batch_size, seq_length, -1)
         status_emb = self.status_embedding(http_status).unsqueeze(1).expand(batch_size, seq_length, -1)
-        app_emb = self.app_embedding(app_id).unsqueeze(1).expand(batch_size, seq_length, -1)
 
         context = torch.cat([
             service_emb, parent_service_emb,
             op_emb, parent_op_emb,
-            status_emb,
-            app_emb
-        ], dim=-1)  # [B, T, context_dim]
+            status_emb
+        ], dim=-1)  # [B, T, 21]
 
         # ---- encoder ----
         enc_input = torch.cat([metrics_x, context], dim=-1)    # [B, T, 22]

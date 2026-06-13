@@ -9,19 +9,17 @@ from torch.utils.data import DataLoader, TensorDataset
 from transformer_ae.model import TransformerAutoencoder
 from common.safe_label_encoder import SafeLabelEncoder
 from common.util import map_status_group
-from configs.constants import UNKNOWN
+from configs.constants import UNKNOWN, DELIMITER
 from sklearn.preprocessing import StandardScaler
 
 def preprocess_df(df):
     df["http_status"] = df["http_status"].astype(int).apply(map_status_group)
+    df['service'] = df['app_id'] + DELIMITER + df['service']
+    df['operation'] = df['app_id'] + DELIMITER + df['operation']
 
-    # Default app_id when missing (older datasets without the column)
-    if "app_id" not in df.columns:
-        df["app_id"] = UNKNOWN
-
-    # Encode categorical data
+    # Encode numeric data
     encoders = {}
-    for col in ["service", "operation", "app_id"]:
+    for col in ["service", "operation"]:
         encoder = SafeLabelEncoder()
         df[col] = encoder.fit_transform(df[col].astype(str))
         encoders[col] = encoder
@@ -42,25 +40,24 @@ def preprocess_df(df):
     sc_unknown_index = encoders["service"].get_unknown_index()
     df["parent_service"] = df["parentSpanId"].map(span_to_service).fillna(sc_unknown_index).astype(int)
 
-    return df[["app_id", "service", "parent_service", "operation", "parent_op", "http_status", "duration"]], encoders, scalers
+    return df[["service", "parent_service", "operation", "parent_op", "http_status", "duration"]], encoders, scalers
 
 def build_sequences(df, seq_len, metric_cols, stride=1):
-    grouped = df.groupby(["app_id", "service", "parent_service", "operation", "parent_op", "http_status"], sort=False)
+    grouped = df.groupby(["service", "parent_service", "operation", "parent_op", "http_status"], sort=False)
 
-    apps, services, parent_services, operations, parent_ops, statuses = [], [], [], [], [], []
+    services, parent_services, operations, parent_ops, statuses = [], [], [], [], []
     metrics_seq = []
 
     metric_cols = list(metric_cols)
 
-    def append_context_features(a, s, ps, op, pop, h):
-        apps.append(a)
+    def append_context_features(s, ps, op, pop, h):
         services.append(s)
         parent_services.append(ps)
         operations.append(op)
         parent_ops.append(pop)
-        statuses.append(h)
-
-    for (a, s, ps, op, pop, h), g in grouped:
+        statuses.append(h)    
+    
+    for (s, ps, op, pop, h), g in grouped:
         metrics = g[metric_cols].to_numpy(dtype=np.float32)
         n = metrics.shape[0]
 
@@ -70,15 +67,14 @@ def build_sequences(df, seq_len, metric_cols, stride=1):
         last_start = n - seq_len
 
         for i in range(0, last_start + 1, stride):
-            append_context_features(a, s, ps, op, pop, h)
+            append_context_features(s, ps, op, pop, h)
             metrics_seq.append(metrics[i:i + seq_len])
 
         if last_start % stride != 0:
-            append_context_features(a, s, ps, op, pop, h)
+            append_context_features(s, ps, op, pop, h)
             metrics_seq.append(metrics[last_start:last_start + seq_len])
 
     return (
-        np.asarray(apps),
         np.asarray(services),
         np.asarray(parent_services),
         np.asarray(operations),
@@ -94,14 +90,13 @@ def train_model(data_set_path):
     seq_len = 20
     metric_cols = ["duration"]
 
-    apps, services, parent_services, operations, parent_ops, statuses, metrics_x = build_sequences(
+    services, parent_services, operations, parent_ops, statuses, metrics_x = build_sequences(
         df, seq_len, metric_cols, 2
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = TensorDataset(
-        torch.LongTensor(apps),
         torch.LongTensor(services),
         torch.LongTensor(parent_services),
         torch.LongTensor(operations),
@@ -116,7 +111,6 @@ def train_model(data_set_path):
         service_vocab=encoders["service"].get_unknown_index() + 1,
         op_vocab=encoders["operation"].get_unknown_index() + 1,
         status_vocab=6,
-        app_vocab=encoders["app_id"].get_unknown_index() + 1,
         metrics_feature_num=len(metric_cols)
     ).to(device)
 
@@ -130,15 +124,15 @@ def train_model(data_set_path):
     
     criterion = nn.MSELoss()
 
-    epochs = 50  # INCREASE EPOCHS
+    epochs = 35  # INCREASE EPOCHS
     for epoch in range(epochs):
         model.train()
         total_loss = 0
 
-        for a, s, ps, op, pop, h, x in loader:
-            a, s, ps, op, pop, h, x = a.to(device), s.to(device), ps.to(device), op.to(device), pop.to(device), h.to(device), x.to(device)
+        for s, ps, op, pop, h, x in loader:
+            s, ps, op, pop, h, x = s.to(device), ps.to(device), op.to(device), pop.to(device), h.to(device), x.to(device)
 
-            recon = model(s, ps, op, pop, h, a, x)
+            recon = model(s, ps, op, pop, h, x)
             loss = criterion(recon, x)
 
             optimizer.zero_grad()
