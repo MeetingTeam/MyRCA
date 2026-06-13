@@ -3,19 +3,19 @@ import logging
 import os
 from collections import Counter
 
-import anthropic
+from openai import OpenAI, APIError
 
 log = logging.getLogger("trace-rca-service")
-_client: anthropic.Anthropic | None = None
+_client: OpenAI | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic()
+        _client = OpenAI()
     return _client
 
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 
 # ── Prompt Template ──────────────────────────────────────────────────
 
@@ -112,15 +112,16 @@ def analyze(
     )
 
     try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
         )
 
-        # Extract text content from response (skip thinking blocks from proxy)
-        text = next(b.text for b in response.content if b.type == "text")
+        text = response.choices[0].message.content or ""
         # Parse JSON from response (handle markdown code blocks)
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
@@ -132,8 +133,8 @@ def analyze(
     except json.JSONDecodeError as e:
         log.error(f"LLM returned invalid JSON: {e}")
         return _fallback_result(ranking)
-    except anthropic.APIError as e:
-        log.error(f"Anthropic API error: {e}")
+    except APIError as e:
+        log.error(f"OpenAI API error: {e}")
         return _fallback_result(ranking)
     except Exception as e:
         log.error(f"LLM analysis failed: {e}", exc_info=True)

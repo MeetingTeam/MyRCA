@@ -2,7 +2,7 @@ confluent-kafka
 boto3
 requests
 pandas
-anthropic
+openai>=1.0.0,<2.0.0
 fastapi
 uvicorn
 clickhouse-driver
