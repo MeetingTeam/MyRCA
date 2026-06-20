@@ -127,7 +127,11 @@ def run():
 
     log.info("Split: train=%d, test=%d", len(train_df), len(test_df))
 
-    # Save to S3
+    # Auto-label test_df with `is_anomaly` (latency + error rule)
+    from tasks.auto_labeler import auto_label_test_df
+    test_df = auto_label_test_df(train_df, test_df)
+
+    # Save to S3 (test.parquet now includes is_anomaly column)
     base = f"mlops/training-data/{version_id}"
     write_parquet_to_s3(train_df, s3_path(f"{base}/train.parquet"))
     write_parquet_to_s3(test_df, s3_path(f"{base}/test.parquet"))

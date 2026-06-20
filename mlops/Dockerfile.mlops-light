@@ -9,5 +9,6 @@ RUN pip install --no-cache-dir -r requirements-mlops-light.txt
 # Copy task code and shared common module
 COPY mlops/tasks/ tasks/
 COPY model/common/ common/
+COPY model/configs/ configs/
 
 CMD ["python", "-c", "print('MLOps lightweight pipeline image ready')"]

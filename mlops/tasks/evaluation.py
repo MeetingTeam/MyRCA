@@ -120,17 +120,32 @@ def run():
     encoders = joblib.load(enc_local)
     scalers = joblib.load(scl_local)
 
-    external_test_path = "mlops/external-datasets/mt-test-data.parquet"
-    test_df = read_parquet_from_s3(s3_path(external_test_path))
-    log.info("Using external test dataset: %s (%d rows)", external_test_path, len(test_df))
+    from botocore.exceptions import ClientError
 
-    # Compute eval dataset stats for MLflow tracking
-    eval_dataset_stats = {
-        "eval_data_path": s3_path(external_test_path),
-        "eval_data_rows": len(test_df),
-        "eval_data_source": "external_fixed",
-        "eval_data_version": "mt-test-data-v1",
-    }
+    internal_test_key = f"mlops/training-data/{version_id}/test.parquet"
+    external_test_key = "mlops/external-datasets/mt-test-data.parquet"
+
+    use_internal = False
+    try:
+        test_df = read_parquet_from_s3(s3_path(internal_test_key))
+        log.info("Loaded internal test set: %s (%d rows)", internal_test_key, len(test_df))
+        use_internal = True
+        eval_dataset_stats = {
+            "eval_data_path": s3_path(internal_test_key),
+            "eval_data_rows": len(test_df),
+            "eval_data_source": "version_test_parquet",
+            "eval_data_version": version_id,
+        }
+    except (ClientError, FileNotFoundError, KeyError) as e:
+        log.warning("Internal test.parquet unavailable (%s) — falling back to external", e)
+        test_df = read_parquet_from_s3(s3_path(external_test_key))
+        log.info("Loaded external fallback: %s (%d rows)", external_test_key, len(test_df))
+        eval_dataset_stats = {
+            "eval_data_path": s3_path(external_test_key),
+            "eval_data_rows": len(test_df),
+            "eval_data_source": "external_fixed_fallback",
+            "eval_data_version": "mt-test-data-v1",
+        }
 
     if "app_id" in test_df.columns:
         app_counts = test_df["app_id"].value_counts().head(10).to_dict()
@@ -149,17 +164,21 @@ def run():
     log.info("Eval dataset stats: %d rows, source=%s",
              eval_dataset_stats["eval_data_rows"], eval_dataset_stats["eval_data_source"])
 
-    rename_map = {
-        "trace_id": "traceId", "span_id": "spanId", "parent_span_id": "parentSpanId",
-    }
-    for old, new in rename_map.items():
-        if old in test_df.columns and new not in test_df.columns:
-            test_df[new] = test_df[old]
+    if not use_internal:
+        # External: rename cols + run preprocess_test_df.
+        # Internal test.parquet is already preprocessed + labeled by preprocessing.py,
+        # so we skip preprocess_test_df to avoid double-encoding label-encoded columns.
+        rename_map = {
+            "trace_id": "traceId", "span_id": "spanId", "parent_span_id": "parentSpanId",
+        }
+        for old, new in rename_map.items():
+            if old in test_df.columns and new not in test_df.columns:
+                test_df[new] = test_df[old]
 
-    if "duration_ns" in test_df.columns and "duration" not in test_df.columns:
-        test_df["duration"] = test_df["duration_ns"]
+        if "duration_ns" in test_df.columns and "duration" not in test_df.columns:
+            test_df["duration"] = test_df["duration_ns"]
 
-    test_df = preprocess_test_df(test_df, encoders, scalers)
+        test_df = preprocess_test_df(test_df, encoders, scalers)
 
     metric_cols = ["duration"]
     services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
