@@ -87,6 +87,13 @@ postgresql:
       requests:
         cpu: 100m
         memory: 128Mi
+    nodeSelector:
+      workload: mlops
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: mlops
+        effect: NoSchedule
 redis:
   enabled: false
 
@@ -110,6 +117,24 @@ scheduler:
     failureThreshold: 20
     periodSeconds: 10
     timeoutSeconds: 60
+  nodeSelector:
+    workload: mlops
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: mlops
+      effect: NoSchedule
+
+# Airflow 3 standalone DAG processor (replaces scheduler-side DAG parsing in Airflow 2).
+dagProcessor:
+  enabled: true
+  nodeSelector:
+    workload: mlops
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: mlops
+      effect: NoSchedule
 
 statsd:
   enabled: false
@@ -123,13 +148,22 @@ apiServer:
     - name: airflow-ui
       port: 8080
       nodePort: 30380
-  defaultUser:
-    enabled: true
-    username: admin
-    password: admin
-    email: admin@example.com
-    firstName: Admin
-    lastName: User
+  nodeSelector:
+    workload: mlops
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: mlops
+      effect: NoSchedule
+
+# defaultUser is a top-level key in Airflow Helm 1.22.0 (was under apiServer/webserver in older charts)
+defaultUser:
+  enabled: true
+  username: admin
+  password: admin
+  email: admin@example.com
+  firstName: Admin
+  lastName: User
 
 webserver:
   args:

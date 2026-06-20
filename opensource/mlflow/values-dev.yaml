@@ -7,11 +7,12 @@ global:
   security:
     allowInsecureImages: true
 
-# -- Override image: use official MLflow (Bitnami images are paywalled) --
+# -- Override image: custom MLflow with boto3 (upstream image lacks boto3, breaks S3 artifact upload) --
+# Build: docker build -t asdads6495/mlflow:3.3.2-boto3 -f opensource/mlflow/Dockerfile.mlflow .
 image:
-  registry: ghcr.io
-  repository: mlflow/mlflow
-  tag: v3.3.2
+  registry: docker.io
+  repository: asdads6495/mlflow
+  tag: 3.3.2-boto3
   pullPolicy: IfNotPresent
 
 # -- Tracking Server (the only component we need) --

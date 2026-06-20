@@ -67,7 +67,7 @@ trace-rca-service (Kafka consumer)
   ├─ Stage 2: For top-5 ranked services:
   │     ├─ Queries Loki: {service_name="X"} | severity_text =~ `ERROR|WARN|FATAL`
   │     │   Time range: [start_dt - 5min, end_dt + 5min]  ← THE FIX
-  │     ├─ Passes logs + ranking to LLM (Claude) for analysis
+  │     ├─ Passes logs + ranking to LLM (OpenAI GPT-5.4 nano) for analysis
   │     └─ LLM produces root cause classification, propagation chain
   │
   ├─ Sends Discord notification
