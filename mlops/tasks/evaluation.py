@@ -38,12 +38,28 @@ log = logging.getLogger("evaluation")
 SEQ_LEN = 20
 
 
+def _sanitize_json(obj):
+    """Replace NaN/Inf with None recursively — Airflow 3 XCom API uses strict JSON encoder."""
+    import math
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
 def write_batch_output(s3_client, bucket, version_id: str, output_data: dict):
-    """Write output to S3 for Airflow XCom replacement (Batch jobs)."""
+    """Write output to S3 for Airflow XCom replacement (Batch jobs).
+
+    Sanitizes NaN/Inf because Airflow 3 XCom API uses strict JSON encoder.
+    """
+    sanitized = _sanitize_json(output_data)
     s3_client.put_object(
         Bucket=bucket,
         Key=f"mlops/batch-outputs/{version_id}/evaluate_output.json",
-        Body=json.dumps(output_data),
+        Body=json.dumps(sanitized),
         ContentType="application/json",
     )
     log.info("Batch output written to S3: mlops/batch-outputs/%s/evaluate_output.json", version_id)
@@ -146,7 +162,7 @@ def run():
     test_df = preprocess_test_df(test_df, encoders, scalers)
 
     metric_cols = ["duration"]
-    apps, services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
+    services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
         test_df, SEQ_LEN, metric_cols, stride=2
     )
 
@@ -159,11 +175,11 @@ def run():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Using device: %s", device)
 
+    # Model design rolled back at commit 82adf6c — no app embedding (kept in sync with training.py).
     model = TransformerAutoencoder(
         service_vocab=encoders["service"].get_unknown_index() + 1,
         op_vocab=encoders["operation"].get_unknown_index() + 1,
         status_vocab=6,
-        app_vocab=encoders["app_id"].get_unknown_index() + 1,
         metrics_feature_num=len(metric_cols),
     ).to(device)
 
@@ -171,7 +187,6 @@ def run():
     model.eval()
 
     dataset = TensorDataset(
-        torch.LongTensor(apps),
         torch.LongTensor(services),
         torch.LongTensor(parent_services),
         torch.LongTensor(operations),
@@ -186,13 +201,13 @@ def run():
     test_df["anomaly_score"] = np.nan
 
     with torch.no_grad():
-        for a, s, ps, op, pop, h, x, row_ids in loader:
-            a, s, ps, op, pop, h, x = (
-                a.to(device), s.to(device), ps.to(device), op.to(device),
+        for s, ps, op, pop, h, x, row_ids in loader:
+            s, ps, op, pop, h, x = (
+                s.to(device), ps.to(device), op.to(device),
                 pop.to(device), h.to(device), x.to(device),
             )
 
-            recon = model(s, ps, op, pop, h, a, x)
+            recon = model(s, ps, op, pop, h, x)
             timestep_loss = criterion(recon, x).sum(dim=2).cpu().numpy()
             row_ids_np = row_ids.numpy()
 

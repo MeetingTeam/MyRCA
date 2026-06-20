@@ -41,6 +41,19 @@ BATCH_SIZE = 64
 LR = 5e-4
 WEIGHT_DECAY = 1e-5
 CHECKPOINT_INTERVAL = 10
+NAN_TOLERANCE = 2  # early stop if loss is NaN/Inf for this many consecutive epochs
+
+
+def _sanitize_json(obj):
+    """Replace NaN/Inf with None recursively — Airflow 3 XCom API uses strict JSON encoder."""
+    import math
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json(v) for v in obj]
+    return obj
 
 
 def build_sequences(df, seq_len, metric_cols, stride=1):
@@ -136,11 +149,15 @@ def load_checkpoint(s3_client, bucket, version_id, model, optimizer, scheduler, 
 
 
 def write_batch_output(s3_client, bucket, version_id: str, output_data: dict):
-    """Write output to S3 for Airflow XCom replacement (Batch jobs)."""
+    """Write output to S3 for Airflow XCom replacement (Batch jobs).
+
+    Sanitizes NaN/Inf because Airflow 3 XCom API uses strict JSON encoder.
+    """
+    sanitized = _sanitize_json(output_data)
     s3_client.put_object(
         Bucket=bucket,
         Key=f"mlops/batch-outputs/{version_id}/train_output.json",
-        Body=json.dumps(output_data),
+        Body=json.dumps(sanitized),
         ContentType="application/json",
     )
     log.info("Batch output written to S3: mlops/batch-outputs/%s/train_output.json", version_id)
@@ -223,7 +240,6 @@ def run():
     log.info("Using device: %s", device)
 
     dataset = TensorDataset(
-        torch.LongTensor(apps),
         torch.LongTensor(services),
         torch.LongTensor(parent_services),
         torch.LongTensor(operations),
@@ -233,11 +249,12 @@ def run():
     )
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
+    # Model design rolled back at commit 82adf6c — no app embedding; app discrimination is
+    # handled by drift_detection per-app, not by the autoencoder.
     model = TransformerAutoencoder(
         service_vocab=encoders["service"].get_unknown_index() + 1,
         op_vocab=encoders["operation"].get_unknown_index() + 1,
         status_vocab=6,
-        app_vocab=encoders["app_id"].get_unknown_index() + 1,
         metrics_feature_num=len(metric_cols),
     ).to(device)
 
@@ -249,6 +266,7 @@ def run():
 
     mlflow_run = start_nested_run(parent_run_id, f"train-{version_id}")
     final_loss = 0.0
+    nan_count = 0  # consecutive NaN/Inf epochs counter for early-stop guard
 
     try:
         if mlflow_run:
@@ -287,13 +305,13 @@ def run():
             model.train()
             total_loss = 0
 
-            for a, s, ps, op, pop, h, x in loader:
-                a, s, ps, op, pop, h, x = (
-                    a.to(device), s.to(device), ps.to(device), op.to(device),
+            for s, ps, op, pop, h, x in loader:
+                s, ps, op, pop, h, x = (
+                    s.to(device), ps.to(device), op.to(device),
                     pop.to(device), h.to(device), x.to(device),
                 )
 
-                recon = model(s, ps, op, pop, h, a, x)
+                recon = model(s, ps, op, pop, h, x)
                 loss = criterion(recon, x)
 
                 optimizer.zero_grad()
@@ -306,6 +324,20 @@ def run():
             avg_loss = total_loss / len(loader)
             scheduler.step(avg_loss)
             current_lr = optimizer.param_groups[0]["lr"]
+
+            # NaN/Inf guard — abort early if training diverged
+            import math
+            if not math.isfinite(avg_loss):
+                nan_count += 1
+                log.warning("Epoch [%d/%d] Loss=NaN/Inf (%d consecutive). LR=%.6f", epoch + 1, EPOCHS, nan_count, current_lr)
+                if mlflow_run:
+                    import mlflow
+                    mlflow.set_tag("nan_diverged", "true")
+                if nan_count >= NAN_TOLERANCE:
+                    log.error("Training diverged (NaN/Inf loss for %d consecutive epochs), stopping early at epoch %d", nan_count, epoch + 1)
+                    break
+            else:
+                nan_count = 0
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 log.info("Epoch [%d/%d] Loss: %.6f | LR: %.6f", epoch + 1, EPOCHS, avg_loss, current_lr)
@@ -357,7 +389,7 @@ def run():
     if os.path.exists(os.path.dirname(xcom_dir)) or os.path.exists("/airflow"):
         os.makedirs(xcom_dir, exist_ok=True)
         with open(os.path.join(xcom_dir, "return.json"), "w") as f:
-            json.dump(xcom, f)
+            json.dump(_sanitize_json(xcom), f)
 
     log.info("Training complete. final_loss=%.6f", final_loss)
 
