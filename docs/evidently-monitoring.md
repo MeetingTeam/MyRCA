@@ -58,12 +58,12 @@ Context class using Strategy Pattern for drift detection.
 - Column validation and dtype checking
 - Sample size verification (min 100 samples)
 
-**Strategies:**
-| Strategy | Purpose |
-|----------|---------|
-| `DriftTestSuiteStrategy` | Test suite with drift tests (default) |
-| `DataDriftStrategy` | Detailed drift report |
-| `DataQualityStrategy` | Data quality metrics |
+**Strategies (all active in `drift_detection.py`):**
+| Strategy | Purpose | Used by |
+|----------|---------|---------|
+| `DriftTestSuiteStrategy` | Test suite — drift pass/fail gate | per-app drift loop (gates retrain) |
+| `DataDriftStrategy` | Detailed drift HTML report | per-app HTML export to S3 |
+| `DataQualityStrategy` | Missing values, duplicates, cardinality, type mismatch | per-app observability (non-blocking) |
 
 ### 2. WorkspaceManager
 
@@ -80,12 +80,14 @@ Manages Evidently UI workspace and projects.
 |-------|------|-------------|
 | Data Drift Tests: Summary | TestSuite (Aggregate) | Overall drift status per day |
 | Data Drift Tests: Detailed | TestSuite (Detailed) | Per-column drift breakdown |
+| Data Quality Report | Report (DataQualityPreset) | Missing values / duplicates / cardinality per app (observability only) |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `USE_EVIDENTLY` | `true` | Enable Evidently drift detection |
+| `RUN_DATA_QUALITY` | `true` | Enable DataQuality report per app (non-blocking observability) |
 | `EVIDENTLY_WORKSPACE` | - | Workspace URL (set in DAG) |
 | `EVIDENTLY_MIN_SAMPLES` | `100` | Min samples for drift detection |
 | `EVIDENTLY_DRIFT_THRESHOLD` | `2` | Max drifted columns before alert |

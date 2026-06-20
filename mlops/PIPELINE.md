@@ -2,189 +2,303 @@
 
 ## Tổng quan
 
-MLOps pipeline tự động hóa quy trình **phát hiện drift → tiền xử lý → huấn luyện → đánh giá → triển khai** cho mô hình Transformer Autoencoder phục vụ phát hiện bất thường (anomaly detection) trên distributed traces.
+MLOps pipeline tự động hóa **phát hiện drift → tiền xử lý → huấn luyện → đánh giá → so sánh model → triển khai** cho Transformer Autoencoder dùng cho anomaly detection trên distributed traces, kèm hai DAG phụ build/deploy RCA Knowledge Base.
 
-Pipeline được điều phối bởi **Apache Airflow** với **KubernetesExecutor** — mỗi bước chạy trong một Pod riêng biệt trên Kubernetes sử dụng chung image `asdads6495/mlops-pipeline:dev`.
+Pipeline điều phối bằng **Apache Airflow (Helm 1.15.0, KubernetesExecutor)**, kiến trúc **hybrid**:
+- Task nhẹ (drift, preprocess, model_comparison, deploy) chạy bằng `KubernetesPodOperator` với image `asdads6495/mlops-pipeline-light:dev`.
+- Task nặng GPU (train, evaluate) chạy trên **AWS Batch Spot** (`us-east-1`, queue `gpu-spot-queue`) với image `mlops-pipeline-gpu` lưu trên ECR.
+
+Data source chính là **ClickHouse** (`clickhouse-cluster-client.clickhouse.svc.cluster.local:9000`), không còn dùng DuckDB đọc S3. ClickHouse tiered storage tự xử lý lifecycle (EBS hot → S3 cold), nên task `compact` cũ đã bị bỏ.
 
 ## Kiến trúc
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    DAG 1: training_pipeline                      │
-│                                                                  │
-│  compact ──► drift_detection ──► check_drift ──► preprocess     │
-│                                      │              │            │
-│                                  (no drift)         ▼            │
-│                                    STOP          train           │
-│                                                    │            │
-│                                                    ▼            │
-│                                                 evaluate        │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  DAG 1: training_pipeline                                                    │
+│                                                                              │
+│  drift_detection ─► check_drift ─┬─► no_retrain (STOP)                       │
+│       (K8s)                       │                                          │
+│                                   └─► trigger_retrain ─► preprocess          │
+│                                                            (K8s)             │
+│                                                              │               │
+│                                                              ▼               │
+│                                                            train  ──► Batch  │
+│                                                              │               │
+│                                                              ▼               │
+│                                                     fetch_train_output (K8s) │
+│                                                              │               │
+│                                                              ▼               │
+│                                                          evaluate ──► Batch  │
+│                                                              │               │
+│                                                              ▼               │
+│                                                   fetch_evaluate_output (K8s)│
+│                                                              │               │
+│                                                              ▼               │
+│                                                     model_comparison (K8s)   │
+│                                                     → khuyến nghị admin      │
+└──────────────────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────────┐
-│              DAG 2: model_deploy (manual trigger)               │
-│                                                                  │
-│          Input: version_id ──► deploy_model                     │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  DAG 2: model_deploy (manual trigger, param: version_id)                     │
+│     deploy_model (K8s) → patch ConfigMap + rolling restart                   │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  DAG 3: kb_building_dag (@weekly)         │ DAG 4: kb_deploy_dag (manual)     │
+│     hungtran679/kb_builder → MLflow       │     hungtran679/kb_deploy:latest  │
+│     model `rca-knowledge-base`            │     → cập nhật trace-rca-service  │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Luồng dữ liệu trên S3
+## Layout S3
+
+Bucket: `kltn-anomaly-dateset-1` (region `ap-southeast-1`).
 
 ```
-s3://kltn-anomaly-dateset-1/
-├── anomalies/data.parquet/          ← Dữ liệu inference (input cho pipeline)
-│   └── date_part=YYYY-MM-DD/
-├── mlops/
-│   ├── drift-reports/{version_id}/  ← Báo cáo drift (JSON)
-│   ├── training-data/{version_id}/  ← Dữ liệu đã xử lý
-│   │   ├── train.parquet
-│   │   ├── test.parquet
-│   │   ├── encoders.pkl
-│   │   └── scalers.pkl
-│   └── models/{version_id}/         ← Model artifacts
-│       ├── model.pth
-│       ├── encoders.pkl
-│       ├── scalers.pkl
-│       └── metadata.json
+s3://kltn-anomaly-dateset-1/mlops/
+├── drift-reports/{version_id}/
+│   ├── drift_report.json                 ← per_app_results có cả quality_summary
+│   └── {app_id}/drift_report.html        ← HTML Evidently per-app
+├── quality-reports/{version_id}/
+│   └── {app_id}/quality_report.html      ← Data quality (missing, dup, cardinality)
+├── training-data/{version_id}/
+│   ├── train.parquet                     ← có cột app_id
+│   ├── test.parquet
+│   ├── encoders.pkl                      ← service, operation, app_id
+│   └── scalers.pkl
+├── models/{version_id}/
+│   ├── model.pth
+│   ├── encoders.pkl
+│   ├── scalers.pkl
+│   └── metadata.json                     ← threshold, mean_score, model_s3_path…
+├── batch-outputs/{version_id}/           ← XCom thay thế cho Batch jobs
+│   ├── train_output.json
+│   └── evaluate_output.json
+└── model-comparisons/{version_id}/
+    └── comparison.json                   ← gate results + recommendation
 ```
 
-Version ID có format: `v{YYYYMMDD-HHMMSS}` (ví dụ: `v20240315-120000`).
+`version_id` format: `v{YYYYMMDD-HHMMSS}` (UTC). Sinh tại bước `drift_detection`.
 
 ## Chi tiết từng bước
 
-### Step 0: Compaction (`tasks/compaction.py`)
-
-**Mục đích:** Gộp các file Parquet nhỏ trong mỗi date partition thành 1 file duy nhất, giảm số lượng file mà DuckDB phải mở khi đọc.
-
-**Hoạt động:**
-1. Quét tất cả date partition trong `anomalies/data.parquet/`
-2. Với mỗi partition có > 1 file: đọc tất cả → ghi lại thành 1 file `compacted.parquet`
-3. Xóa các file cũ (DuckDB hoặc fallback sang boto3)
-
 ### Step 1: Drift Detection (`tasks/drift_detection.py`)
 
-**Mục đích:** So sánh phân phối dữ liệu inference hiện tại với dữ liệu training trước đó để quyết định có cần retrain hay không.
+**Mục đích:** Quyết định có cần retrain hay không, theo từng app (`app_id`).
+
+**Data source:** ClickHouse, đọc cửa sổ `DRIFT_WINDOW_MINUTES` phút gần nhất (fallback 60 phút nếu rỗng).
+
+**Multi-app:** chỉ xử lý các app trong `KNOWN_APPS = ["microservices-demo", "k8s-repo-application"]`, group dữ liệu hiện tại theo `app_id` và so từng app với baseline tương ứng.
+
+**Baseline lookup (theo thứ tự):**
+1. MLflow alias `champion` trên model `transformer-ae` (khuyến nghị, MLflow ≥ 2.9)
+2. MLflow alias `production`
+3. MLflow stage `Production` (deprecated, backwards-compat)
+4. Fallback: version mới nhất trong `mlops/training-data/`
 
 **Thuật toán:**
-- **PSI (Population Stability Index)** trên `duration_ns`: chia reference distribution thành 10 bin theo quantile, tính PSI giữa reference và current. Ngưỡng mặc định: `0.2`
-- **New API detection**: phát hiện các cặp `(service, operation)` mới chưa xuất hiện trong dữ liệu training trước
+- **Evidently** (`USE_EVIDENTLY=true`) — `DriftTestSuiteStrategy` trên numeric `[duration_ns, duration]` + categorical `[service, operation]`. Mỗi app sinh 1 HTML report đẩy lên S3 và (nếu có `EVIDENTLY_WORKSPACE`) thêm vào workspace UI.
+- **PSI fallback** trên `duration_ns` — 10 bin quantile, ngưỡng `PSI_THRESHOLD=0.2`. Dùng khi `USE_EVIDENTLY=false` hoặc Evidently lỗi.
+- **New API detection** — luôn chạy, set `(service, operation)` mới so với baseline ⇒ drift.
+- **`FORCE_DRIFT=true`** — bypass mọi check, ép drift (dùng để test).
+- **Data quality (observability)** — `RUN_DATA_QUALITY=true` (mặc định) chạy thêm `DataQualityStrategy` per-app: missing values, duplicates, cardinality. **Non-blocking** — không ảnh hưởng `drift_detected`, chỉ ghi HTML lên `quality-reports/{version_id}/{app_id}/` và push Evidently UI. Summary nhúng vào `per_app_results[app_id].quality_summary` của `drift_report.json`.
 
-**Drift được kích hoạt khi:**
-- Lần chạy đầu tiên (không có dữ liệu training trước)
-- PSI > 0.2 (phân phối duration thay đổi đáng kể)
-- Xuất hiện API endpoint mới
+**Điều kiện drift:**
+- Lần chạy đầu (không có baseline).
+- Bất kỳ app nào vượt ngưỡng Evidently hoặc PSI.
+- Xuất hiện API mới.
 
-**Output:** Drift report (JSON lên S3) + XCom `{version_id, drift_detected}` cho Airflow.
+**Output:**
+- `drift-reports/{version_id}/drift_report.json` (per_app_results, drifted_apps, psi_duration, new_apis, mlflow_run_id…).
+- XCom `{version_id, drift_detected, mlflow_run_id}`.
+- Nếu drift: **mở MLflow parent pipeline run** (`start_pipeline_run`) — các bước sau log dưới dạng nested run.
 
-**Short-circuit:** Nếu `drift_detected = False`, `ShortCircuitOperator` sẽ skip toàn bộ các bước sau.
+**Sample-size guard:** `MIN_DRIFT_SAMPLES` (env, default 100; DAG override `10`). Dưới ngưỡng → bỏ qua, không retrain.
+
+**Branching:** `check_drift` (`BranchPythonOperator`) đọc XCom rồi rẽ sang `trigger_retrain` (EmptyOperator → tiếp tục) hoặc `no_retrain` (EmptyOperator → STOP).
 
 ### Step 2: Preprocessing (`tasks/preprocessing.py`)
 
-**Mục đích:** Encode và scale dữ liệu thô thành format phù hợp cho training.
+Pod K8s, image light.
 
-**Hoạt động:**
-1. Đọc dữ liệu span từ `anomalies/data.parquet/`
-2. Map `http_status` thành status group (1xx→1, 2xx→2, ..., 5xx→5)
-3. **Label encode** các cột `service`, `operation` bằng `SafeLabelEncoder`
-4. **StandardScaler** trên cột `duration`
-5. Tính `parent_op` và `parent_service` từ `parentSpanId`
-6. Shuffle và split 70/30 → `train.parquet` + `test.parquet`
-7. Upload encoders/scalers (pickle) lên S3
+1. Đọc dữ liệu từ ClickHouse cho cửa sổ `TRAINING_WINDOW_DAYS` (env, default `3`).
+2. `http_status` → status group (1–5) qua `common.util.map_status_group`.
+3. `SafeLabelEncoder` cho `service`, `operation`, **`app_id`**.
+4. `StandardScaler` cho `duration`.
+5. Suy ra `parent_op`, `parent_service` từ `parentSpanId` (fallback `unknown_index`).
+6. Shuffle, split 70/30 → `train.parquet` + `test.parquet`.
+7. Upload encoders/scalers (`joblib`) lên `mlops/training-data/{version_id}/`.
 
-### Step 3: Training (`tasks/training.py`)
+### Step 3: Training (`tasks/training.py`) — AWS Batch
 
-**Mục đích:** Huấn luyện Transformer Autoencoder trên dữ liệu đã tiền xử lý.
+Job definition `mlops-train-job`, queue `gpu-spot-queue`, region `us-east-1`, image GPU trên ECR.
 
 **Cấu hình:**
+
 | Tham số | Giá trị |
-|---------|---------|
+|---|---|
 | Sequence length | 20 spans |
 | Stride | 2 |
 | Epochs | 50 |
 | Batch size | 64 |
 | Learning rate | 5e-4 |
+| Weight decay | 1e-5 |
+| Checkpoint interval | 10 epoch |
 | d_model | 64 |
 | Latent dim | 32 |
 
 **Hoạt động:**
-1. Đọc `train.parquet` và encoders từ S3
-2. Nhóm span theo `(service, parent_service, operation, parent_op, http_status)` → tạo sequence dài 20 với stride 2
-3. Train Transformer Autoencoder (MSE loss, Adam optimizer, ReduceLROnPlateau scheduler, gradient clipping 1.0)
-4. Upload `model.pth`, `encoders.pkl`, `scalers.pkl` lên `mlops/models/{version_id}/`
-5. Log tất cả metrics và register model vào **MLflow** (`transformer-ae`)
+1. Tải `train.parquet` + encoders từ S3.
+2. Group span theo `(app_id, service, parent_service, operation, parent_op, http_status)` ⇒ sliding window len 20, stride 2.
+3. Train `TransformerAutoencoder` (MSE, Adam, ReduceLROnPlateau, gradient clipping 1.0).
+4. **Checkpointing** mỗi 10 epoch để recover khi Spot bị interrupt.
+5. Upload `model.pth`, `encoders.pkl`, `scalers.pkl` lên `mlops/models/{version_id}/`.
+6. Log metrics + register model `transformer-ae` trong MLflow dưới nested run của parent pipeline run.
+7. Ghi `mlops/batch-outputs/{version_id}/train_output.json` → thay thế Airflow XCom (Batch không xài XCom được).
 
-**Resource:** CPU 500m–2, Memory 1Gi–4Gi
+**fetch_train_output (K8s):** PythonOperator, retry exponential backoff đọc S3 (NoSuchKey ⇒ retry, tối đa 5 lần), push XCom cho task sau.
 
-### Step 4: Evaluation (`tasks/evaluation.py`)
+### Step 4: Evaluation (`tasks/evaluation.py`) — AWS Batch
 
-**Mục đích:** Đánh giá model trên test set và tính ngưỡng anomaly (p99 threshold).
+Job definition `mlops-evaluate-job`, cùng queue GPU Spot.
 
-**Hoạt động:**
-1. Download model artifacts + test data từ S3
-2. Build sequence từ test data → inference với model
-3. Tính anomaly score = reconstruction error (MSE)
-4. Boost score +1000 cho span có `span_status=2` (error) hoặc `http_status=5` (5xx)
-5. Tính **p99 threshold** từ các span bình thường (non-error)
-6. Log metrics lên MLflow, save `metadata.json` lên S3
+1. Tải model + encoders + `test.parquet`.
+2. Build sequence, inference, anomaly score = reconstruction MSE.
+3. **Boost +1000** cho span `span_status=2` (error) hoặc `http_status=5` (5xx).
+4. Tính **p99 threshold** từ span non-error.
+5. Tính **F1 / precision / recall** dùng cột `is_anomaly` làm ground truth (qua `precision_recall_curve`).
+6. Ghi `metadata.json` (version, threshold, model_s3_path, mean_score, test_samples) lên S3.
+7. Log metrics MLflow ⇒ **kết thúc parent pipeline run** (`end_pipeline_run`).
+8. Ghi `mlops/batch-outputs/{version_id}/evaluate_output.json`.
 
-**`metadata.json` chứa:** version, threshold, model_s3_path, mean_score, test_samples — được dùng bởi bước deploy.
+`fetch_evaluate_output` tương tự fetch_train.
 
-### Step 5: Model Deploy (`tasks/model_deploy.py`) — DAG 2
+### Step 5: Model Comparison (`tasks/model_comparison.py`) — K8s
 
-**Mục đích:** Triển khai model version cụ thể lên Anomaly Detection Service đang chạy.
+**Chỉ xuất khuyến nghị, không tự deploy.**
 
-**Hoạt động:**
-1. Download `metadata.json` từ `mlops/models/{version_id}/`
-2. Patch ConfigMap `anomaly-detection-service-config` trong namespace `anomaly-detection`:
+1. Lấy champion hiện tại qua alias `champion` (model `transformer-ae`).
+2. Lấy challenger theo `version_id` (search model versions, lọc theo tag `version_id`).
+3. So sánh qua **3 gate**:
+
+| Gate | Quy tắc | Tolerance |
+|---|---|---|
+| F1 | `challenger ≥ champion × 0.99` | 1% (fixed) |
+| Precision | `challenger ≥ champion × (1 − T)` | `COMPARISON_PRECISION_TOLERANCE=0.05` |
+| Recall | `challenger ≥ champion × (1 − T)` | `COMPARISON_RECALL_TOLERANCE=0.05` |
+
+4. Output `comparison.json` lên `mlops/model-comparisons/{version_id}/`:
+   - `recommendation`: `PROMOTE` (first model hoặc all gates pass), `KEEP_CURRENT` (gate fail), `ERROR` (không tìm thấy challenger).
+   - Kèm `action` là command Airflow CLI để admin chạy `model_deploy` nếu muốn promote.
+
+5. Admin review report rồi quyết định trigger DAG 2.
+
+### Step 6: Model Deploy (`tasks/model_deploy.py`) — DAG 2
+
+Pod chạy với `service_account_name=airflow-deploy-sa` (cần quyền patch ConfigMap + Deployment trong namespace `anomaly-detection`).
+
+1. Tải `mlops/models/{version_id}/metadata.json`.
+2. Patch ConfigMap `anomaly-detection-service-config`:
    - `ANOMALY_THRESHOLD` = p99 threshold
    - `MODEL_S3_PATH` = đường dẫn S3 tới model
-   - `MODEL_VERSION` = version_id
-3. Trigger **rolling restart** deployment bằng cách patch annotation `restartedAt`
-4. (Best-effort) Transition model version sang stage `Production` trong MLflow
+   - `MODEL_VERSION` = `version_id`
+3. Patch annotation `kubectl.kubernetes.io/restartedAt` trên deployment `anomaly-detection-service` ⇒ rolling restart.
+4. (Best-effort) `mlflow_client.set_registered_model_alias("transformer-ae", "champion", v.version)` cho version có tag `version_id` khớp.
 
-**Yêu cầu:** Pod chạy với `airflow-deploy-sa` ServiceAccount có quyền patch ConfigMap và Deployment trong namespace `anomaly-detection`.
+## DAG phụ — RCA Knowledge Base
 
-## Cách trigger pipeline
+### DAG 3: `kb_building_dag` (`dags/kb_building_dag.py`)
+
+- Schedule: `@weekly`.
+- Pod image `hungtran679/kb_builder`, namespace `airflow`.
+- Env từ secret `airflow-aws-secret`, `airflow-clickhouse-secret`, configmap `airflow-kb-builder-configmap`.
+- Resource: 200m/512Mi → 500m/1Gi.
+- Output: đăng ký MLflow model `rca-knowledge-base`.
+
+### DAG 4: `kb_deploy_dag` (`dags/kb_deploy_dag.py`)
+
+- Manual trigger, param `version_id`.
+- Pod image `hungtran679/kb_deploy:latest`, ServiceAccount `mlops-deployer-sa`.
+- Pull KB version từ MLflow rồi cập nhật deployment `trace-rca-service` trong namespace `rca`.
+
+## Trigger pipeline
 
 ### Training Pipeline (DAG 1)
 ```bash
-# Qua Airflow UI
-# Truy cập http://<airflow>:30380 → DAGs → training_pipeline → Trigger
-
-# Qua CLI
 airflow dags trigger training_pipeline
+# Force drift (debug):
+airflow dags trigger training_pipeline --conf '{"FORCE_DRIFT": "true"}'
 ```
-Schedule: Manual trigger (`schedule_interval=None`), có thể đổi sang `@weekly`.
+Schedule mặc định `None` (manual). `FORCE_DRIFT` truyền qua env vars của pod.
 
 ### Model Deploy (DAG 2)
 ```bash
-# Qua Airflow UI với parameter version_id
-# DAGs → model_deploy → Trigger w/ config → {"version_id": "v20240315-120000"}
-
-# Qua CLI
 airflow dags trigger model_deploy --conf '{"version_id": "v20240315-120000"}'
 ```
 
-## Công nghệ sử dụng
+### KB Building (DAG 3)
+Tự động @weekly, hoặc trigger tay qua UI.
 
-| Thành phần | Công nghệ |
-|-----------|-----------|
-| Orchestrator | Apache Airflow (Helm chart v1.15.0, KubernetesExecutor) |
-| Model Registry | MLflow v2.12.2 |
-| Storage | AWS S3 (DuckDB httpfs + boto3) |
-| Training Framework | PyTorch |
-| Data Processing | pandas, scikit-learn, DuckDB |
-| Container Runtime | Kubernetes Pods (via KubernetesPodOperator) |
-
-## Docker Image
-
-```dockerfile
-# Build từ root repo
-docker build -t asdads6495/mlops-pipeline:dev -f mlops/Dockerfile.mlops .
+### KB Deploy (DAG 4)
+```bash
+airflow dags trigger kb_deploy_dag --conf '{"version_id": "<mlflow_kb_version>"}'
 ```
 
-Image chứa:
-- `tasks/` — code các bước pipeline
-- `common/` — shared utilities (SafeLabelEncoder, util)
-- `transformer_ae/` — model definition + evaluate logic
-- `configs/` — cấu hình model
+## Biến môi trường chính (DAG 1)
+
+| Env | Mặc định | Ý nghĩa |
+|---|---|---|
+| `MLFLOW_TRACKING_URI` | `http://mlflow-tracking.mlflow.svc:5000` | MLflow server |
+| `S3_BUCKET` | `kltn-anomaly-dateset-1` | Bucket data |
+| `S3_REGION` | `ap-southeast-1` | Region bucket |
+| `CLICKHOUSE_HOST` | `clickhouse-cluster-client.clickhouse.svc` | DNS ClickHouse |
+| `CLICKHOUSE_PORT` | `9000` | Native protocol |
+| `USE_EVIDENTLY` | `true` | Bật Evidently (tắt → PSI fallback) |
+| `RUN_DATA_QUALITY` | `true` | Bật DataQuality report per-app (observability, non-blocking) |
+| `EVIDENTLY_WORKSPACE` | `http://evidently-ui.mlops.svc:8000` | UI workspace (optional) |
+| `PSI_THRESHOLD` | `0.2` | Ngưỡng PSI |
+| `MIN_DRIFT_SAMPLES` | `100` (DAG ép `10`) | Min sample để chạy drift |
+| `FORCE_DRIFT` | `false` | Bypass drift check |
+| `TRAINING_WINDOW_DAYS` | `3` | Cửa sổ data cho preprocess |
+| `COMPARISON_PRECISION_TOLERANCE` | `0.05` | Tolerance gate precision |
+| `COMPARISON_RECALL_TOLERANCE` | `0.05` | Tolerance gate recall |
+
+Secret `airflow-aws-secret` (env_from) cung cấp `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` cho S3 + Batch.
+
+## Công nghệ sử dụng
+
+| Lớp | Công nghệ |
+|---|---|
+| Orchestrator | Apache Airflow Helm v1.15.0, KubernetesExecutor |
+| Compute nhẹ | K8s Pods (namespace `airflow`), image `asdads6495/mlops-pipeline-light:dev` |
+| Compute nặng | AWS Batch GPU Spot (`us-east-1`), image `mlops-pipeline-gpu` (ECR) |
+| Data source | ClickHouse cluster (namespace `clickhouse`) + tiered storage S3 |
+| Drift | Evidently v0.4.x (namespace `mlops`) + PSI custom (fallback) |
+| Model registry | MLflow v2.12.2 (namespace `mlflow`) — alias `champion`/`production` |
+| Object storage | AWS S3 (boto3) |
+| Training framework | PyTorch |
+| Data processing | pandas, scikit-learn, `clickhouse-driver` |
+| Container runtime | Kubernetes Pods (`KubernetesPodOperator`) + `BatchOperator` |
+| Deploy target | `anomaly-detection-service` (ns `anomaly-detection`), `trace-rca-service` (ns `rca`) |
+
+## Docker Images
+
+```bash
+# Light image — K8s tasks (drift, preprocess, comparison, deploy, KB)
+docker build -t asdads6495/mlops-pipeline-light:dev -f mlops/Dockerfile.mlops-light .
+
+# GPU image — AWS Batch (train, evaluate)
+docker build -t mlops-pipeline-gpu -f mlops/Dockerfile.mlops-gpu .
+# Tag + push lên ECR us-east-1, dùng làm job definition image cho Batch.
+
+# Airflow image (custom, gồm provider AWS + ClickHouse driver)
+docker build -t <airflow-image>:<tag> -f mlops/Dockerfile.airflow .
+```
+
+Mỗi image chứa: `tasks/`, `common/`, `transformer_ae/`, `configs/`. Image light bỏ CUDA stack để giảm size.
+
+## Câu hỏi chưa rõ
+
+- `kb_building_dag` deploy KB version nào (có pin version vào MLflow alias hay phải truyền tay)? Code không thấy alias setting.
+- `model_comparison` chỉ in log/action — chưa có cơ chế tự động trigger DAG `model_deploy`, có phải mặc ý chờ admin?
+- Có integration nào giữa drift signal (`drifted_apps`) và KB pipeline không, hay 2 pipeline hoàn toàn độc lập?

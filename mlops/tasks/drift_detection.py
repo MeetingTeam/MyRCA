@@ -29,7 +29,7 @@ from tasks.s3_utils import (
 from tasks.clickhouse_utils import load_recent_anomaly_data
 from tasks.mlflow_utils import start_pipeline_run
 from tasks.evidently_monitoring import SpanMonitoring, WorkspaceManager
-from tasks.evidently_strategies import DriftTestSuiteStrategy, DataDriftStrategy
+from tasks.evidently_strategies import DriftTestSuiteStrategy, DataDriftStrategy, DataQualityStrategy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("drift-detection")
@@ -41,6 +41,7 @@ NUM_BINS = 10
 
 # Evidently feature flag and configuration
 USE_EVIDENTLY = os.getenv("USE_EVIDENTLY", "true").lower() == "true"
+RUN_DATA_QUALITY = os.getenv("RUN_DATA_QUALITY", "true").lower() == "true"
 NUMERIC_FEATURES = ["duration_ns", "duration"]
 CATEGORICAL_FEATURES = ["service", "operation"]
 KNOWN_APPS = ["microservices-demo", "k8s-repo-application"]
@@ -169,10 +170,69 @@ def compute_psi_for_app(ref_df: pd.DataFrame, cur_df: pd.DataFrame) -> float:
     return compute_psi(ref_df[ref_col].astype(float).values, cur_df[cur_col].astype(float).values)
 
 
+def generate_quality_report_for_app(
+    ref_df: pd.DataFrame,
+    cur_df: pd.DataFrame,
+    app_id: str,
+    version_id: str,
+    workspace_mgr: WorkspaceManager | None,
+    s3_client,
+) -> dict | None:
+    """Run Evidently DataQuality report for a single app.
+
+    Non-blocking observability — returns a small summary dict on success,
+    or None on any failure. Never raises, never affects drift_detected.
+    """
+    try:
+        monitor = SpanMonitoring(
+            strategy=DataQualityStrategy(),
+            numeric_features=NUMERIC_FEATURES,
+            categorical_features=CATEGORICAL_FEATURES,
+        )
+        report_obj = monitor.execute(ref_df, cur_df)
+
+        # Push to Evidently UI workspace (best-effort)
+        if workspace_mgr:
+            try:
+                workspace_mgr.add_report(app_id, report_obj)
+            except Exception as e:
+                log.warning("Quality workspace push failed for %s: %s", app_id, e)
+
+        # Upload HTML to S3 (best-effort)
+        if s3_client:
+            try:
+                local_html = f"/tmp/quality_{app_id}_{version_id}.html"
+                report_obj.save_html(local_html)
+                with open(local_html, "rb") as f:
+                    s3_client.put_object(
+                        Bucket=S3_BUCKET,
+                        Key=f"mlops/quality-reports/{version_id}/{app_id}/quality_report.html",
+                        Body=f,
+                        ContentType="text/html",
+                    )
+                log.info("Quality report saved for app: %s", app_id)
+            except Exception as e:
+                log.warning("Quality S3 upload failed for %s: %s", app_id, e)
+
+        # Defensive summary extraction — Evidently schema may shift between versions
+        summary = {"app_id": app_id, "report_uploaded": True}
+        try:
+            result = report_obj.as_dict()
+            summary["metrics_count"] = len(result.get("metrics", []))
+        except Exception:
+            pass
+        return summary
+    except Exception as e:
+        log.warning("DataQuality failed for app %s: %s", app_id, e)
+        return None
+
+
 def detect_drift_per_app(
     current_df: pd.DataFrame,
     prev_version: str,
     workspace_mgr: WorkspaceManager | None = None,
+    version_id: str | None = None,
+    s3_client=None,
 ) -> dict:
     """
     Detect drift for each app_id separately using Evidently.
@@ -253,6 +313,14 @@ def detect_drift_per_app(
             if psi > PSI_THRESHOLD:
                 drifted_apps.append(app_id)
 
+        # DataQuality report — non-blocking observability layer
+        if RUN_DATA_QUALITY and version_id:
+            quality_summary = generate_quality_report_for_app(
+                ref_df, app_df, app_id, version_id, workspace_mgr, s3_client
+            )
+            if quality_summary and app_id in app_results:
+                app_results[app_id]["quality_summary"] = quality_summary
+
     return {
         "app_results": app_results,
         "drift_detected": len(drifted_apps) > 0,
@@ -282,16 +350,7 @@ def run():
         return write_xcom_and_return(version_id, False, None, "no_retrain")
 
     if current_df.empty:
-        log.warning("No data in last %d mins, falling back to 60-min window", window_minutes)
-        window_minutes = 60
-        try:
-            current_df = load_recent_anomaly_data(window_minutes)
-        except Exception as e:
-            log.error("Failed to load fallback data from ClickHouse: %s", e)
-            return write_xcom_and_return(version_id, False, None, "no_retrain")
-
-    if current_df.empty:
-        log.info("No data after startTime filter — skipping")
+        log.error("No data in last %d mins — pipeline upstream may be broken, skipping retrain", window_minutes)
         return write_xcom_and_return(version_id, False, None, "no_retrain")
 
     if len(current_df) < MIN_SAMPLE_COUNT:
@@ -333,10 +392,17 @@ def run():
                 except Exception as e:
                     log.warning("Could not init workspace: %s", e)
 
+            # Pre-create S3 client once for per-app HTML uploads (drift + quality)
+            import boto3
+            shared_s3_client = boto3.client("s3", region_name=os.getenv("S3_REGION", "ap-southeast-1"))
+
             # Evidently-based drift detection (with feature flag)
             if use_evidently_this_run:
                 try:
-                    result = detect_drift_per_app(current_df, prev_version, workspace_mgr)
+                    result = detect_drift_per_app(
+                        current_df, prev_version, workspace_mgr,
+                        version_id=version_id, s3_client=shared_s3_client,
+                    )
                     drift_detected = result["drift_detected"]
                     per_app_results = result["app_results"]
                     drifted_apps = result["drifted_apps"]
