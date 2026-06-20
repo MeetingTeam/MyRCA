@@ -39,16 +39,39 @@ ENV_VARS = [
     k8s.V1EnvVar(name="S3_REGION", value=S3_REGION),
     k8s.V1EnvVar(name="S3_ENDPOINT", value="s3.amazonaws.com"),
     k8s.V1EnvVar(name="S3_USE_SSL", value="true"),
-    k8s.V1EnvVar(name="FORCE_DRIFT", value="false"),
+    k8s.V1EnvVar(name="FORCE_DRIFT", value="{{ dag_run.conf.get('FORCE_DRIFT', 'false') if dag_run and dag_run.conf else 'false' }}"),
     k8s.V1EnvVar(name="USE_EVIDENTLY", value="true"),
     k8s.V1EnvVar(name="EVIDENTLY_WORKSPACE", value="http://evidently-ui.mlops.svc.cluster.local:8000"),
-    k8s.V1EnvVar(name="MIN_DRIFT_SAMPLES", value="10"),
+    k8s.V1EnvVar(name="DRIFT_WINDOW_MINUTES", value="1440"),
     k8s.V1EnvVar(name="CLICKHOUSE_HOST", value="clickhouse-cluster-client.clickhouse.svc.cluster.local"),
     k8s.V1EnvVar(name="CLICKHOUSE_PORT", value="9000"),
 ]
 
 ENV_FROM = [
     k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="airflow-aws-secret")),
+]
+
+# Resource limits prevent any single MLOps pod from OOM-killing a t3.medium node.
+# Values chosen for post-R2 (downcast + query_dataframe) memory footprint with headroom.
+DRIFT_RESOURCES = k8s.V1ResourceRequirements(
+    requests={"cpu": "250m", "memory": "512Mi"},
+    limits={"cpu": "1500m", "memory": "1.5Gi"},
+)
+
+PREPROCESS_RESOURCES = k8s.V1ResourceRequirements(
+    requests={"cpu": "500m", "memory": "1Gi"},
+    limits={"cpu": "1500m", "memory": "2.5Gi"},  # cpu cap 1.5 to leave 500m for kubelet/system on 2-vCPU node
+)
+
+LIGHT_RESOURCES = k8s.V1ResourceRequirements(
+    requests={"cpu": "100m", "memory": "256Mi"},
+    limits={"cpu": "500m", "memory": "1Gi"},
+)
+
+# Pin MLOps tasks to the dedicated MLOps node (tainted workload=mlops:NoSchedule).
+MLOPS_NODE_SELECTOR = {"workload": "mlops"}
+MLOPS_TOLERATIONS = [
+    k8s.V1Toleration(key="workload", operator="Equal", value="mlops", effect="NoSchedule"),
 ]
 
 
@@ -86,6 +109,15 @@ def read_batch_output(version_id: str, task_name: str, max_retries: int = 5) -> 
                 raise
 
 
+def _sanitize_xcom(d: dict) -> dict:
+    """Replace NaN/Inf with None — Airflow 3 XCom API uses strict JSON encoder."""
+    import math
+    return {
+        k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+        for k, v in d.items()
+    }
+
+
 def fetch_train_output(**context):
     """Fetch training output from S3 after Batch job completes."""
     ti = context["ti"]
@@ -95,7 +127,7 @@ def fetch_train_output(**context):
     if not version_id:
         raise ValueError("version_id not found in drift_detection XCom")
 
-    output = read_batch_output(version_id, "train")
+    output = _sanitize_xcom(read_batch_output(version_id, "train"))
     ti.xcom_push(key="return_value", value=output)
     return output
 
@@ -109,7 +141,7 @@ def fetch_evaluate_output(**context):
     if not version_id:
         raise ValueError("version_id not found in drift_detection XCom")
 
-    output = read_batch_output(version_id, "evaluate")
+    output = _sanitize_xcom(read_batch_output(version_id, "evaluate"))
     ti.xcom_push(key="return_value", value=output)
     return output
 
@@ -137,6 +169,9 @@ with DAG(
         cmds=["python", "-m", "tasks.drift_detection"],
         env_vars=ENV_VARS,
         env_from=ENV_FROM,
+        container_resources=DRIFT_RESOURCES,
+        node_selector=MLOPS_NODE_SELECTOR,
+        tolerations=MLOPS_TOLERATIONS,
         do_xcom_push=True,
         is_delete_operator_pod=True,
         get_logs=True,
@@ -165,6 +200,9 @@ with DAG(
             ),
         ],
         env_from=ENV_FROM,
+        container_resources=PREPROCESS_RESOURCES,
+        node_selector=MLOPS_NODE_SELECTOR,
+        tolerations=MLOPS_TOLERATIONS,
         do_xcom_push=True,
         is_delete_operator_pod=True,
         get_logs=True,
@@ -239,6 +277,9 @@ with DAG(
             ),
         ],
         env_from=ENV_FROM,
+        container_resources=LIGHT_RESOURCES,
+        node_selector=MLOPS_NODE_SELECTOR,
+        tolerations=MLOPS_TOLERATIONS,
         do_xcom_push=True,
         is_delete_operator_pod=True,
         get_logs=True,

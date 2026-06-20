@@ -36,12 +36,30 @@ def get_clickhouse_client() -> Client:
     return _client
 
 
+def _downcast_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Shrink DataFrame footprint in-place: int64→int32/16, float64→float32, low-card object→category."""
+    for col in df.select_dtypes(include=["int64"]).columns:
+        df[col] = pd.to_numeric(df[col], downcast="integer")
+    for col in df.select_dtypes(include=["float64"]).columns:
+        df[col] = pd.to_numeric(df[col], downcast="float")
+    n = len(df)
+    if n > 0:
+        for col in df.select_dtypes(include=["object"]).columns:
+            if df[col].nunique() < n * 0.5:
+                df[col] = df[col].astype("category")
+    return df
+
+
 def query_to_dataframe(query: str) -> pd.DataFrame:
-    """Execute query and return pandas DataFrame."""
+    """Execute query and return memory-efficient pandas DataFrame.
+
+    Uses clickhouse-driver native query_dataframe (numpy direct) instead of
+    execute()+list-of-tuples → pd.DataFrame to halve peak fetch memory, then
+    downcast dtypes to further cut ~50% RAM. Prevents node OOM under load.
+    """
     client = get_clickhouse_client()
-    result, columns = client.execute(query, with_column_types=True)
-    col_names = [c[0] for c in columns]
-    return pd.DataFrame(result, columns=col_names)
+    df = client.query_dataframe(query)
+    return _downcast_dtypes(df)
 
 
 def load_anomaly_data(window_days: int) -> pd.DataFrame:

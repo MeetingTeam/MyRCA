@@ -11,7 +11,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-DRIFT_WINDOW_MINUTES = int(os.getenv("DRIFT_WINDOW_MINUTES", "10"))
+DRIFT_WINDOW_MINUTES = int(os.getenv("DRIFT_WINDOW_MINUTES", "1440"))
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "s3.amazonaws.com")
 S3_REGION = os.getenv("S3_REGION", "ap-southeast-1")
