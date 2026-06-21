@@ -54,11 +54,11 @@ flower:
 
 images:
   airflow:
-    repository: asdads6495/my-airflow
+    repository: hungtran679/my-airflow
     tag: "3.0.6"
     pullPolicy: Always
   pod_template:
-    repository: asdads6495/my-airflow
+    repository: hungtran679/my-airflow
     tag: "3.0.6"
     pullPolicy: Always
 
@@ -148,6 +148,7 @@ apiServer:
     - name: airflow-ui
       port: 8080
       nodePort: 30380
+<<<<<<< HEAD
   nodeSelector:
     workload: mlops
   tolerations:
@@ -164,6 +165,15 @@ defaultUser:
   email: admin@example.com
   firstName: Admin
   lastName: User
+=======
+  # defaultUser:
+  #   enabled: true
+  #   username: admin
+  #   password: admin
+  #   email: admin@example.com
+  #   firstName: Admin
+  #   lastName: User
+>>>>>>> 317aa79 (improve kb-builder)
 
 webserver:
   args:
@@ -177,6 +187,7 @@ webserver:
     lastName: User
     password: admin
     username: admin
+    role: Admin
   extraInitContainers: []
   extraVolumeMounts: []
   extraVolumes: []

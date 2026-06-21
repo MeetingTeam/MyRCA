@@ -1,5 +1,6 @@
 from collections import defaultdict
 import logging
+from statistics import mean
 
 # Setup logging
 logging.basicConfig(
@@ -62,7 +63,7 @@ def convert_span_scores_to_services(trace, invocation_scores):
         service = trace["nodes"][inv_id]["service"]
         score_map[service].append(score)
     
-    return {s: max(scores) for s, scores in score_map.items()}
+    return {s: mean(scores) for s, scores in score_map.items()}
 
 def compute_causal_scores(traces, kb):
     """

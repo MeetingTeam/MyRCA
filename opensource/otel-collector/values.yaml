@@ -28,9 +28,11 @@ ingestor:
       batch:
         timeout: 1s
         send_batch_size: 10
+      probabilistic_sampler:
+        sampling_percentage: 5
 
     exporters:
-      otlp:
+      otlp/tempo:
         endpoint: "tempo.tempo.svc.cluster.local:4317"
         tls:
           insecure: true
@@ -48,10 +50,14 @@ ingestor:
     service:
       extensions: [health_check]
       pipelines:
-        traces:
+        traces/kafka:
           receivers: [otlp]
           processors: [transform/set_nginx_app_id, filter/drop_no_app_id, batch]
-          exporters: [otlp, kafka]
+          exporters: [kafka]
+        traces/tempo:
+          receivers: [otlp]
+          processors: [probabilistic_sampler, batch]
+          exporters: [otlp/tempo]
         logs:
           receivers: [otlp]
           processors: [batch]
@@ -67,9 +73,12 @@ ingestor:
       runAsGroup: 1000
       fsGroup: 1000
 
-    replicaCount: 2
+    replicaCount: 3
 
     env: []
+
+    additionalVolumes: []
+    additionalVolumeMounts: []
 
     resources:
       requests:

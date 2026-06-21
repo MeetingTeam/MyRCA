@@ -114,7 +114,7 @@ def analyze(
     try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
-            max_tokens=1024,
+            max_completion_tokens=1024,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},

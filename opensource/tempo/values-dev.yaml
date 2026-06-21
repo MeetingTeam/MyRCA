@@ -1,25 +1,9 @@
 # Tempo Development Configuration
 # Monolithic mode for thesis demo
 # Architecture: Tempo receives traces from AI Model (not directly from apps)
-# Backend Storage: AWS S3 (tempo-traces bucket)
+# Backend Storage: local filesystem on PVC
 
 tempo:
-  # CRITICAL: Required for ${ENV_VAR} expansion in config.
-  # Without this, Tempo sends literal "${AWS_ACCESS_KEY_ID}" to AWS.
-  extraArgs:
-    config.expand-env: "true"
-  # Inject AWS credentials from secret
-  extraEnv:
-    - name: AWS_ACCESS_KEY_ID
-      valueFrom:
-        secretKeyRef:
-          name: tempo-s3-credentials
-          key: access-key
-    - name: AWS_SECRET_ACCESS_KEY
-      valueFrom:
-        secretKeyRef:
-          name: tempo-s3-credentials
-          key: secret-key
   resources:
     requests:
       cpu: 500m
@@ -56,19 +40,12 @@ tempo:
         http:
           endpoint: 0.0.0.0:4318
   
-  # Storage backend configuration - AWS S3
-  # Credentials stored in Kubernetes Secret: tempo-s3-credentials
+  # Storage backend configuration - local filesystem on PVC
   storage:
     trace:
-      backend: s3
-      blocklist_poll: 30s  # Poll S3 for new blocks every 30s (default: 5m)
-      s3:
-        bucket: pqhung-tempo-traces  # Tempo owns this bucket structure
-        endpoint: s3.amazonaws.com
-        region: ap-southeast-1
-        # Credentials from Kubernetes Secret (see Phase 4.2.1 in task.plan)
-        access_key: ${AWS_ACCESS_KEY_ID}
-        secret_key: ${AWS_SECRET_ACCESS_KEY}
+      backend: local
+      local:
+        path: /var/tempo/traces
       # Tempo's internal block format
       block:
         version: vParquet4  # Tempo's columnar storage format
@@ -84,13 +61,12 @@ tempo:
   # Compaction and retention (managed by Tempo)
   compactor:
     compaction:
-      block_retention: 720h  # 30 days retention
+      block_retention: 2h  # 2 hours retention to keep local PVC usage bounded
 
-# Local WAL persistence (for ingestion buffer only)
-# Actual trace data stored in S3, not local PVC
+# Local PVC persistence for WAL + trace blocks
 persistence:
   enabled: true
-  size: 5Gi  # Only for WAL buffer, not trace storage
+  size: 20Gi
   storageClassName: "ebs-sc"  # Use EBS CSI StorageClass
 
 # Service configuration

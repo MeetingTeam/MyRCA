@@ -28,6 +28,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from transformer_ae.model import TransformerAutoencoder
+from transformer_ae.train import build_sequences
 from tasks.s3_utils import read_parquet_from_s3, s3_path
 from tasks.mlflow_utils import setup_mlflow, start_nested_run
 
@@ -36,7 +37,7 @@ log = logging.getLogger("training")
 
 SEQ_LEN = 20
 STRIDE = 2
-EPOCHS = 50
+EPOCHS = 30
 BATCH_SIZE = 64
 LR = 5e-4
 WEIGHT_DECAY = 1e-5
@@ -54,56 +55,6 @@ def _sanitize_json(obj):
     if isinstance(obj, list):
         return [_sanitize_json(v) for v in obj]
     return obj
-
-
-def build_sequences(df, seq_len, metric_cols, stride=1):
-    """Build fixed-length sequences grouped by context features."""
-    if "app_id" not in df.columns:
-        log.warning("app_id column not found in training data - using default value 0")
-        df = df.copy()
-        df["app_id"] = 0
-    grouped = df.groupby(["app_id", "service", "parent_service", "operation", "parent_op", "http_status"], sort=False)
-
-    apps, services, parent_services, operations, parent_ops, statuses = [], [], [], [], [], []
-    metrics_seq = []
-    metric_cols = list(metric_cols)
-
-    for (a, s, ps, op, pop, h), g in grouped:
-        metrics = g[metric_cols].to_numpy(dtype=np.float32)
-        n = metrics.shape[0]
-
-        if n < seq_len:
-            continue
-
-        last_start = n - seq_len
-        for i in range(0, last_start + 1, stride):
-            apps.append(a)
-            services.append(s)
-            parent_services.append(ps)
-            operations.append(op)
-            parent_ops.append(pop)
-            statuses.append(h)
-            metrics_seq.append(metrics[i:i + seq_len])
-
-        if last_start % stride != 0:
-            apps.append(a)
-            services.append(s)
-            parent_services.append(ps)
-            operations.append(op)
-            parent_ops.append(pop)
-            statuses.append(h)
-            metrics_seq.append(metrics[last_start:last_start + seq_len])
-
-    return (
-        np.asarray(apps),
-        np.asarray(services),
-        np.asarray(parent_services),
-        np.asarray(operations),
-        np.asarray(parent_ops),
-        np.asarray(statuses),
-        np.stack(metrics_seq) if metrics_seq else np.empty((0, seq_len, len(metric_cols))),
-    )
-
 
 def save_checkpoint(s3_client, bucket, version_id, epoch, model, optimizer, scheduler, loss):
     """Save training checkpoint to S3 for Spot interruption recovery."""
@@ -219,14 +170,8 @@ def run():
     s3_client.download_file(bucket, f"mlops/training-data/{version_id}/encoders.pkl", enc_local)
     encoders = joblib.load(enc_local)
 
-    if "app_id" not in encoders:
-        log.warning("app_id encoder not found - creating default with vocab size 2")
-        from common.safe_label_encoder import SafeLabelEncoder
-        encoders["app_id"] = SafeLabelEncoder()
-        encoders["app_id"].fit(["default"])
-
     metric_cols = ["duration"]
-    apps, services, parent_services, operations, parent_ops, statuses, metrics_x = build_sequences(
+    services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
         train_df, SEQ_LEN, metric_cols, STRIDE
     )
 
@@ -266,7 +211,6 @@ def run():
 
     mlflow_run = start_nested_run(parent_run_id, f"train-{version_id}")
     final_loss = 0.0
-    nan_count = 0  # consecutive NaN/Inf epochs counter for early-stop guard
 
     try:
         if mlflow_run:
@@ -323,24 +267,9 @@ def run():
 
             avg_loss = total_loss / len(loader)
             scheduler.step(avg_loss)
+
             current_lr = optimizer.param_groups[0]["lr"]
-
-            # NaN/Inf guard — abort early if training diverged
-            import math
-            if not math.isfinite(avg_loss):
-                nan_count += 1
-                log.warning("Epoch [%d/%d] Loss=NaN/Inf (%d consecutive). LR=%.6f", epoch + 1, EPOCHS, nan_count, current_lr)
-                if mlflow_run:
-                    import mlflow
-                    mlflow.set_tag("nan_diverged", "true")
-                if nan_count >= NAN_TOLERANCE:
-                    log.error("Training diverged (NaN/Inf loss for %d consecutive epochs), stopping early at epoch %d", nan_count, epoch + 1)
-                    break
-            else:
-                nan_count = 0
-
-            if (epoch + 1) % 10 == 0 or epoch == 0:
-                log.info("Epoch [%d/%d] Loss: %.6f | LR: %.6f", epoch + 1, EPOCHS, avg_loss, current_lr)
+            log.info("Epoch [%d/%d] Loss: %.6f | LR: %.6f", epoch, EPOCHS, avg_loss, current_lr)
 
             if mlflow_run:
                 import mlflow

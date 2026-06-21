@@ -95,7 +95,7 @@ def compute_classification_metrics(scored_df: pd.DataFrame) -> dict:
 
 
 def run():
-    version_id = os.getenv("VERSION_ID")
+    version_id = "v20260621-111438"
     if not version_id:
         log.error("VERSION_ID not set")
         sys.exit(1)
@@ -239,12 +239,14 @@ def run():
                         continue
 
                     score = float(timestep_loss[b, t_idx])
+                    log.info("Scored %d", score)
 
                     if test_df.at[row, "span_status"] == 2 or test_df.at[row, "http_status"] == 5:
                         score += 1000
 
                     if np.isnan(test_df.at[row, "anomaly_score"]):
                         test_df.at[row, "anomaly_score"] = score
+                        log.info("Insert score")
                     else:
                         test_df.at[row, "anomaly_score"] = max(test_df.at[row, "anomaly_score"], score)
 
