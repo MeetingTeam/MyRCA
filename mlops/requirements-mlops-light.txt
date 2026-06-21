@@ -11,3 +11,6 @@ scikit-learn==1.6.1
 
 # Evidently for drift detection (pinned version for stability)
 evidently==0.4.33
+
+# Kubernetes Python client for model_deploy (ConfigMap patch + rolling restart)
+kubernetes>=27.2.0

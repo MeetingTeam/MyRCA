@@ -87,6 +87,8 @@ def run():
     # Set model alias to champion in MLflow (optional, best-effort)
     try:
         import mlflow
+        from mlflow.environment_variables import MLFLOW_HTTP_REQUEST_TIMEOUT
+        MLFLOW_HTTP_REQUEST_TIMEOUT.set(10)  # fail fast — deploy already done above
         mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-tracking.mlflow.svc.cluster.local:5000")
         mlflow.set_tracking_uri(mlflow_uri)
         mlflow_client = mlflow.tracking.MlflowClient()

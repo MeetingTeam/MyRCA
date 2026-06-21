@@ -22,7 +22,7 @@ PIPELINE_IMAGE = "asdads6495/mlops-pipeline-light:dev"
 NAMESPACE = "airflow"
 
 ENV_VARS = [
-    k8s.V1EnvVar(name="MLFLOW_TRACKING_URI", value="http://mlflow.mlflow.svc.cluster.local:5000"),
+    k8s.V1EnvVar(name="MLFLOW_TRACKING_URI", value="http://mlflow-tracking.mlflow.svc.cluster.local:5000"),
     k8s.V1EnvVar(name="S3_BUCKET", value="kltn-anomaly-dateset-1"),
     k8s.V1EnvVar(name="S3_REGION", value="ap-southeast-1"),
     k8s.V1EnvVar(name="S3_ENDPOINT", value="s3.amazonaws.com"),
@@ -58,7 +58,10 @@ with DAG(
         image_pull_policy="Always",
         cmds=["python", "-m", "tasks.model_deploy"],
         env_vars=ENV_VARS + [
-            k8s.V1EnvVar(name="VERSION_ID", value="{{ params.version_id }}"),
+            k8s.V1EnvVar(
+                name="VERSION_ID",
+                value="{{ dag_run.conf.get('version_id', params.version_id) if dag_run and dag_run.conf else params.version_id }}",
+            ),
         ],
         env_from=ENV_FROM,
         service_account_name="airflow-deploy-sa",
