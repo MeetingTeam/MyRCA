@@ -86,10 +86,13 @@ def run():
 
     # Set model alias to champion in MLflow (optional, best-effort)
     try:
+        import os as _os
+        # Disable retries and cap timeout — connection failure here is non-fatal
+        _os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
+        _os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
         import mlflow
-        from mlflow.environment_variables import MLFLOW_HTTP_REQUEST_TIMEOUT
-        MLFLOW_HTTP_REQUEST_TIMEOUT.set(10)  # fail fast — deploy already done above
-        mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-tracking.mlflow.svc.cluster.local:5000")
+        # Always use the correct MLflow service name regardless of env var
+        mlflow_uri = "http://mlflow-tracking.mlflow.svc.cluster.local:5000"
         mlflow.set_tracking_uri(mlflow_uri)
         mlflow_client = mlflow.tracking.MlflowClient()
 
