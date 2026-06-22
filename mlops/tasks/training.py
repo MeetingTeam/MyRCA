@@ -171,7 +171,7 @@ def run():
     encoders = joblib.load(enc_local)
 
     metric_cols = ["duration"]
-    services, parent_services, operations, parent_ops, statuses, metrics_x, row_idx = build_sequences(
+    services, parent_services, operations, parent_ops, statuses, metrics_x = build_sequences(
         train_df, SEQ_LEN, metric_cols, STRIDE
     )
 
